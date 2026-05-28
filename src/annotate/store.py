@@ -14,6 +14,38 @@ class ProjectConflictError(Exception):
     pass
 
 
+def _repair_shape_prefixes(prior_meta: dict, new_meta: dict) -> None:
+    """Repair xy arrays that lost their shape-ID prefix.
+
+    Browser drag of an existing polyline can strip the leading shape ID,
+    leaving xy[0] as a coordinate float instead of an integer 1–7. For
+    regions that already exist in prior_meta with a valid shape, restore
+    that shape ID. For new regions arriving with a non-integer xy[0],
+    default to polyline (shape 6) — matches the SKILL.md convention.
+    """
+    for mid, m in new_meta.items():
+        xy = m.get("xy")
+        if not xy or not isinstance(xy, list):
+            continue
+        head = xy[0]
+        # Valid shape prefix is an integer 1–7 (point/rect/circle/ellipse/poly/etc.)
+        if isinstance(head, int) and 1 <= head <= 7:
+            continue
+        if isinstance(head, float) and head.is_integer() and 1 <= int(head) <= 7:
+            xy[0] = int(head)
+            continue
+        # Missing or garbled shape prefix — try to recover from prior version
+        prior = prior_meta.get(mid)
+        if prior and isinstance(prior.get("xy"), list) and prior["xy"]:
+            prior_shape = prior["xy"][0]
+            if isinstance(prior_shape, int) and 1 <= prior_shape <= 7:
+                m["xy"] = [prior_shape] + list(xy)
+                continue
+        # No prior — fall back to polyline (matches the SKILL.md convention
+        # for browser-drawn in-progress draws).
+        m["xy"] = [6] + list(xy)
+
+
 class ProjectStore:
     def __init__(self, state_file: Path) -> None:
         self._lock = threading.Lock()
@@ -65,6 +97,7 @@ class ProjectStore:
             payload["project"]["pid"] = pid
             payload["project"]["rev"] = new_rev
             payload["project"]["rev_timestamp"] = ts
+            _repair_shape_prefixes(self._project.get("metadata", {}), payload.get("metadata", {}))
             self._project = payload
             self._persist()
         return {"pid": pid, "rev": new_rev, "rev_timestamp": ts}

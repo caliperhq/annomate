@@ -59,7 +59,10 @@ If you're not sure which kind of image you have, start with a small batch.
 | Save project JSON to disk | `via_save_project` |
 
 Prefer `via_get_annotations` over `via_get_project` for reads — it returns only
-metadata, not the full project blob.
+metadata, not the full project blob. After the user corrects placements in the
+browser, call `via_get_annotations(format="fraction")` to get coords as 0–1
+fractions — easier to diff against your originals than raw pixels, and forces
+the calibration arithmetic onto the server.
 
 ## Loading Images
 
@@ -151,6 +154,22 @@ The `xy` field is an array where the first element is the shape ID:
 | Polygon | `[7, x1, y1, x2, y2, ...]` |
 
 Coordinates are **image pixel space**, not browser canvas space.
+
+### Choose the natural shape first; rectangle is the fallback
+
+Before placing each region, ask what the natural shape of the feature is. Each
+shape choice is itself a claim about the feature, and a varied-shape annotation
+set communicates more than a rectangle-only one.
+
+- Spheres, disc faces, clock faces, single visible eyes → **circle**
+- Foreshortened domes, brims, oblique disks → **ellipse**
+- Irregular tear-drops, triangular bodies, path/road footprints → **polygon**
+- Thin diagonal features (struts, wires, ropes, branches) → **polyline**
+- Directional intent (gaze, trajectory, line of sight) → **polyline** with arrow-phrase label
+- Genuinely axis-aligned bounded regions (a window, a body, a building face) → **rectangle**
+
+Default to rectangle only when the feature is genuinely rectangular or when no
+other shape obviously fits.
 
 ### Coordinate space — prefer `xy_space="fraction"`
 
@@ -342,6 +361,48 @@ is to box the *bulk* of the feature and clip the *extremity*. Before
 declaring a placement done, identify the lowest/rightmost/etc. pixel that
 semantically belongs to the named feature and check the box edge reaches it.
 
+**Box the whole named object, not its most prominent part.** A box labelled
+`church` covers nave + tower + spire, not just the tower. A box labelled
+`foot warmer` covers the wooden housing + base + visible shadow, not just
+the pierced-top cube. A box labelled `tree` covers trunk + crown together.
+Different family from extend-to-extremity (which is about a single part's
+edges) — this is about *which structural parts count as the thing being
+named*. Ask: if a viewer drew a line around "the X" with no prior context,
+where would they stop? Box to there.
+
+**Re-crop immediately before placing small features.** Crops you took during
+orientation fall out of working memory after ~5 unrelated tool calls. For
+any feature under ~10% of canvas extent, call `via_get_image_crop` on its
+local area again *just before* placing — not as a correction step after.
+Reading position off a remembered orientation crop reverts to thumbnail-
+eyeball precision and produces 30–500 px offsets that survive overlay.
+Sub-30 px features in clean backgrounds (single birds in sky, distant
+figures) want this even more strongly — place coords directly off a full-
+res crop, not off the full-image overlay.
+
+**Crop-and-drop, not just crop-and-place.** `via_get_image_crop` is also
+a go/no-go tool. If a candidate feature doesn't survive a high-resolution
+crop — the "lightning tower" turns out to be utility poles, the "single
+wall clock" turns out to be empty shelf-front — drop the annotation rather
+than place a confident box on a feature you can't actually see. Resist the
+urge to label features from prior expectation when the pixels don't
+disambiguate them.
+
+**Densely-figured vertical compositions: pre-crop the halves.** When a
+figural composition fills most of the frame vertically (a Lamentation,
+a multi-figure interior, a tall street scene), a single full-image overlay
+at 2048 px compresses the vertical extent enough to hide ~15% y-bias on
+your placements. Before placing any boxes, take two crops — upper half and
+lower half — and place positions off those, not the full-image view. Saves
+a full correction round.
+
+**Time-of-day priors need season and latitude.** "5 a.m. local" is
+pre-dawn in winter at mid-latitudes but well past sunrise in late spring;
+"morning" at the equator is different from the same hour at 60° N. When
+your prior depends on lighting, shadow direction, or sky colour from a
+timestamp, check season + latitude before committing — otherwise the
+clock-face overrides the actual photometry visible in the image.
+
 **Reflections are separate regions.** On still water, glass, polished floors,
 or any mirror surface, the reflection is its own visual region — not part of
 the object it reflects. A box for "tree" must not extend into the inverted
@@ -396,6 +457,11 @@ feature look misaligned in the overlay even when the geometry is fine.
 **"That box looks off — let me check"**
 → `via_get_image_crop(fid, bbox, xy_space="fraction", overlay=true)`
 on the suspected area; full-res crop reveals what the downscaled overlay hid
+
+**"User just corrected my boxes in the browser — what changed?"**
+→ `via_get_annotations(format="fraction")`, compare against the fractions
+you last placed. Pixel-space diffs require manual scale arithmetic; the
+fraction format makes the deltas readable directly.
 
 **"Re-annotate everything based on..."**
 → `via_update_project` with the full modified project JSON

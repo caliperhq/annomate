@@ -82,6 +82,56 @@ def test_update_from_browser_wrong_rev_raises(store):
         store.update_from_browser(result["pid"], "999", payload)
 
 
+def test_update_from_browser_repairs_stripped_polyline_prefix(store):
+    """Regression for 10-deposition: browser drag of a polyline can strip the
+    leading shape-ID `6`, leaving xy as raw coords. Repair on push by
+    consulting the prior version's shape."""
+    proj = _minimal_project()
+    proj["metadata"] = {
+        "mid1": {"vid": "1", "flg": 0, "z": [], "xy": [6, 10, 20, 30, 40], "av": {}},
+    }
+    result = store.create(proj)
+    pid, rev = result["pid"], result["rev"]
+
+    payload = store.get()
+    # simulate browser stripping the shape prefix on drag
+    payload["metadata"]["mid1"]["xy"] = [15.0, 25.0, 35.0, 45.0]
+    store.update_from_browser(pid, rev, payload)
+
+    restored = store.get()["metadata"]["mid1"]["xy"]
+    assert restored == [6, 15.0, 25.0, 35.0, 45.0]
+
+
+def test_update_from_browser_new_region_without_prefix_defaults_to_polyline(store):
+    """If there's no prior version to recover the shape from, treat as polyline
+    (matches the long-standing SKILL.md convention for in-progress draws)."""
+    result = store.create(_minimal_project())
+    pid, rev = result["pid"], result["rev"]
+
+    payload = store.get()
+    payload["metadata"]["new_mid"] = {
+        "vid": "1", "flg": 0, "z": [], "xy": [11.0, 22.0, 33.0, 44.0], "av": {},
+    }
+    store.update_from_browser(pid, rev, payload)
+
+    repaired = store.get()["metadata"]["new_mid"]["xy"]
+    assert repaired[0] == 6
+    assert repaired[1:] == [11.0, 22.0, 33.0, 44.0]
+
+
+def test_update_from_browser_leaves_valid_shape_prefix_alone(store):
+    """Valid integer shape prefixes 1–7 should never be rewritten."""
+    result = store.create(_minimal_project())
+    pid, rev = result["pid"], result["rev"]
+
+    payload = store.get()
+    payload["metadata"]["rect"] = {
+        "vid": "1", "flg": 0, "z": [], "xy": [2, 10, 20, 30, 40], "av": {},
+    }
+    store.update_from_browser(pid, rev, payload)
+    assert store.get()["metadata"]["rect"]["xy"] == [2, 10, 20, 30, 40]
+
+
 def test_set_project_bumps_revision(store):
     store.create(_minimal_project())
     project = store.get()

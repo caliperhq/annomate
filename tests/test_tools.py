@@ -84,21 +84,66 @@ def test_list_files_returns_file_list(loaded_store):
 # --- via_get_annotations ---
 
 def test_get_annotations_no_project(store):
-    result = handle_get_annotations(store, vid=None)
+    result = handle_get_annotations(store, {}, vid=None)
     assert "No project" in _text(result)
 
 
 def test_get_annotations_returns_all(loaded_store):
-    result = handle_get_annotations(loaded_store, vid=None)
+    result = handle_get_annotations(loaded_store, {}, vid=None)
     data = json.loads(_text(result))
     assert "abc12345" in data
 
 
 def test_get_annotations_filtered_by_vid(loaded_store):
-    result = handle_get_annotations(loaded_store, vid="2")
+    result = handle_get_annotations(loaded_store, {}, vid="2")
     data = json.loads(_text(result))
     assert "abc12345" not in data  # belongs to vid="1"
     assert data == {}
+
+
+def test_get_annotations_bad_format(loaded_store):
+    result = handle_get_annotations(loaded_store, {}, vid=None, format="garbage")
+    assert "format" in _text(result)
+
+
+def test_get_annotations_fraction_format(store, tmp_path):
+    """fraction format inverts pixel coords to 0–1 of the original dims."""
+    from PIL import Image as PILImage
+    img_path = tmp_path / "big.jpg"
+    PILImage.new("RGB", (4000, 2000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    handle_add_region(store, registry, vid="1", z=[],
+                      xy=[2, 1000, 500, 200, 400], av={"label": "r"})
+
+    result = handle_get_annotations(store, registry, vid=None, format="fraction")
+    data = json.loads(_text(result))
+    [region] = data.values()
+    xy = region["xy"]
+    # 1000/4000=0.25, 500/2000=0.25, 200/4000=0.05, 400/2000=0.2
+    assert xy[0] == 2
+    assert xy[1] == pytest.approx(0.25)
+    assert xy[2] == pytest.approx(0.25)
+    assert xy[3] == pytest.approx(0.05)
+    assert xy[4] == pytest.approx(0.2)
+
+
+def test_get_annotations_both_format(store, tmp_path):
+    """both format keeps pixel xy and adds xy_fraction + dims."""
+    from PIL import Image as PILImage
+    img_path = tmp_path / "big.jpg"
+    PILImage.new("RGB", (4000, 2000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    handle_add_region(store, registry, vid="1", z=[],
+                      xy=[2, 1000, 500, 200, 400], av={"label": "r"})
+
+    result = handle_get_annotations(store, registry, vid=None, format="both")
+    data = json.loads(_text(result))
+    [region] = data.values()
+    assert region["xy"] == [2, 1000, 500, 200, 400]
+    assert region["xy_fraction"][1] == pytest.approx(0.25)
+    assert region["dims"] == [4000, 2000]
 
 
 # --- via_add_region ---
@@ -606,6 +651,44 @@ def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
     assert "overlay=on" in result[0].text
     assert isinstance(result[1], types.ImageContent)
     assert len(result[1].data) > 0
+
+
+def test_get_image_crop_overlay_skips_off_crop_regions(store, tmp_path):
+    """Regression for the phantom-label bug (12-vermeer): a region whose box is
+    entirely outside the crop window must not render a label at the clamped
+    crop edge. Off-crop regions should be skipped entirely.
+    """
+    from PIL import Image as PILImage
+    from annotate.server import _draw_overlay
+    img_path = tmp_path / "big.jpg"
+    PILImage.new("RGB", (4000, 2000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    # Region at original y=100 — well above the (y=1500, h=400) crop window
+    handle_add_region(store, {}, vid="1", z=[], xy=[2, 100, 100, 50, 50],
+                      av={"label": "OFFCROP"})
+    # In-crop region for sanity
+    handle_add_region(store, {}, vid="1", z=[], xy=[2, 600, 1600, 100, 100],
+                      av={"label": "INCROP"})
+
+    # Build a synthetic crop image and run _draw_overlay directly so we can
+    # inspect what got drawn. Crop window: (500, 1500, 800, 400) in original.
+    project = store.get()
+    crop = PILImage.new("RGB", (800, 400), color=(0, 0, 0))
+    crop._overlay_orig_w = 800
+    crop._overlay_orig_h = 400
+    crop._overlay_offset_x = 500
+    crop._overlay_offset_y = 1500
+    _draw_overlay(crop, project, "1")
+    # The OFFCROP label was previously rendered at y=0 (max(0, anchor-12)).
+    # After the fix, no pixels in the top row should have been written for it.
+    # Check: top-left 4x4 corner stays black (no phantom label).
+    pixels = crop.load()
+    top_left_dark = all(
+        pixels[x, y] == (0, 0, 0)
+        for x in range(4) for y in range(4)
+    )
+    assert top_left_dark, "off-crop region rendered a phantom label at crop edge"
 
 
 # --- view-reset-bug regression (P0) ---

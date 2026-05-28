@@ -212,16 +212,70 @@ def handle_list_files(store: ProjectStore) -> list[types.TextContent]:
     return _text(json.dumps(file_list, indent=2))
 
 
+def _xy_to_fraction(xy: list, w: int, h: int) -> list:
+    """Inverse of _scale_xy: return original-space xy as 0–1 fractions of (w, h)."""
+    if not xy or w <= 0 or h <= 0:
+        return xy
+    shape = xy[0]
+    coords = xy[1:]
+    if shape == 2 and len(coords) == 4:  # rect [x, y, w, h]
+        x, y, rw, rh = coords
+        return [shape, x / w, y / h, rw / w, rh / h]
+    if shape == 3 and len(coords) == 3:  # circle [cx, cy, r]
+        cx, cy, r = coords
+        return [shape, cx / w, cy / h, r / ((w + h) / 2)]
+    if shape == 4 and len(coords) == 4:  # ellipse [cx, cy, rx, ry]
+        cx, cy, rx, ry = coords
+        return [shape, cx / w, cy / h, rx / w, ry / h]
+    out: list = [shape]
+    for i, c in enumerate(coords):
+        out.append(c / (w if i % 2 == 0 else h))
+    return out
+
+
 def handle_get_annotations(
-    store: ProjectStore, vid: str | None
+    store: ProjectStore,
+    image_registry: dict,
+    vid: str | None,
+    format: str = "pixel",
 ) -> list[types.TextContent]:
     project = store.get()
     if project is None:
         return _text("No project loaded.")
+    if format not in ("pixel", "fraction", "both"):
+        return _text(f"format must be 'pixel', 'fraction', or 'both', got {format!r}")
     metadata = project.get("metadata", {})
     if vid is not None:
         metadata = {mid: m for mid, m in metadata.items() if m.get("vid") == vid}
-    return _text(json.dumps(metadata, indent=2))
+    if format == "pixel":
+        return _text(json.dumps(metadata, indent=2))
+    # 'fraction' or 'both' — resolve dims per region via its vid's fid_list
+    dims_cache: dict[str, tuple[int, int] | None] = {}
+
+    def dims_for(v: str) -> tuple[int, int] | None:
+        if v in dims_cache:
+            return dims_cache[v]
+        fid = _resolve_fid_for_vid(project, v)
+        d = _image_dims(project, image_registry, fid) if fid else None
+        dims_cache[v] = d
+        return d
+
+    out: dict = {}
+    for mid, m in metadata.items():
+        v = m.get("vid", "")
+        d = dims_for(v)
+        if d is None:
+            # dims unavailable — keep pixel coords and flag it
+            entry = {**m, "_dims_unavailable": True}
+            out[mid] = entry
+            continue
+        w, h = d
+        frac_xy = _xy_to_fraction(m.get("xy") or [], w, h)
+        if format == "fraction":
+            out[mid] = {**m, "xy": frac_xy}
+        else:  # both
+            out[mid] = {**m, "xy_fraction": frac_xy, "dims": [w, h]}
+    return _text(json.dumps(out, indent=2))
 
 
 def handle_add_region(
@@ -381,10 +435,36 @@ _OVERLAY_PALETTE = [
 ]
 
 
+def _region_bbox_orig(shape: int, coords: list) -> tuple[float, float, float, float] | None:
+    """Return (x0, y0, x1, y1) of the region in original-image space, or None."""
+    try:
+        if shape == 1 and len(coords) >= 2:
+            x, y = coords[0], coords[1]
+            return (x, y, x, y)
+        if shape == 2 and len(coords) >= 4:
+            x, y, w, h = coords[0], coords[1], coords[2], coords[3]
+            return (x, y, x + w, y + h)
+        if shape == 3 and len(coords) >= 3:
+            cx, cy, r = coords[0], coords[1], coords[2]
+            return (cx - r, cy - r, cx + r, cy + r)
+        if shape == 4 and len(coords) >= 4:
+            cx, cy, rx, ry = coords[0], coords[1], coords[2], coords[3]
+            return (cx - rx, cy - ry, cx + rx, cy + ry)
+        if shape in (6, 7) and len(coords) >= 4:
+            xs = [coords[i] for i in range(0, len(coords) - 1, 2)]
+            ys = [coords[i + 1] for i in range(0, len(coords) - 1, 2)]
+            return (min(xs), min(ys), max(xs), max(ys))
+    except (TypeError, IndexError):
+        return None
+    return None
+
+
 def _draw_overlay(img, project: dict, fid: str) -> None:
     """Draw all regions belonging to views referencing `fid` onto img (in-place).
     Coordinates in project metadata are original-space; img may be downscaled,
-    so we scale per-axis.
+    so we scale per-axis. When drawing onto a crop, regions whose bounding box
+    lies entirely outside the crop viewport are skipped to avoid phantom labels
+    rendered at clamped edges.
     """
     from PIL import ImageDraw, ImageFont
     view_to_fids = {
@@ -397,16 +477,17 @@ def _draw_overlay(img, project: dict, fid: str) -> None:
     ]
     if not relevant:
         return
-    # find original dims from the file entry
-    entry = project.get("file", {}).get(str(fid), {})
-    # Caller already opened/resized; we infer scale from the image vs original.
-    # The original dims come from PIL before resize, passed in via attrs we set.
-    orig_w = getattr(img, "_overlay_orig_w", img.size[0])
-    orig_h = getattr(img, "_overlay_orig_h", img.size[1])
+    # The viewport spans (ox, oy) → (ox + view_w, oy + view_h) in original
+    # pixel space. For full-image overlays this is the whole image; for crops
+    # the caller sets _overlay_orig_w/h to the crop's original-space size.
+    view_w = getattr(img, "_overlay_orig_w", img.size[0])
+    view_h = getattr(img, "_overlay_orig_h", img.size[1])
     ox = getattr(img, "_overlay_offset_x", 0)
     oy = getattr(img, "_overlay_offset_y", 0)
-    sx = img.size[0] / orig_w
-    sy = img.size[1] / orig_h
+    sx = img.size[0] / view_w
+    sy = img.size[1] / view_h
+    vp_x0, vp_y0 = ox, oy
+    vp_x1, vp_y1 = ox + view_w, oy + view_h
     draw = ImageDraw.Draw(img)
     try:
         font = ImageFont.load_default()
@@ -418,6 +499,13 @@ def _draw_overlay(img, project: dict, fid: str) -> None:
             continue
         shape = int(xy[0]) if xy[0] == int(xy[0]) else 0
         coords = xy[1:]
+        bbox = _region_bbox_orig(shape, coords)
+        if bbox is None:
+            continue
+        bx0, by0, bx1, by1 = bbox
+        # skip regions that don't intersect the viewport at all
+        if bx1 < vp_x0 or bx0 > vp_x1 or by1 < vp_y0 or by0 > vp_y1:
+            continue
         color = _OVERLAY_PALETTE[i % len(_OVERLAY_PALETTE)]
         label = (m.get("av") or {}).get("1", "")
         anchor = None
@@ -453,11 +541,20 @@ def _draw_overlay(img, project: dict, fid: str) -> None:
         except (TypeError, IndexError):
             continue
         if label and anchor is not None:
-            tx, ty = anchor[0] + 3, max(0, anchor[1] - 12)
-            # cheap text shadow for legibility
-            for ox, oy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                draw.text((tx + ox, ty + oy), label, fill=(0, 0, 0), font=font)
-            draw.text((tx, ty), label, fill=color, font=font)
+            # Anchor the label at the top-left of the visible-in-viewport
+            # portion of the region's bbox. Without this, regions whose top-
+            # left is above/left of the viewport get labels rendered at the
+            # clamped crop edge — the phantom-label bug from 12-vermeer.
+            ivx0 = max(bx0, vp_x0)
+            ivy0 = max(by0, vp_y0)
+            lx = (ivx0 - ox) * sx + 3
+            ly_top = (ivy0 - oy) * sy - 12
+            ly = ly_top if ly_top >= 0 else (ivy0 - oy) * sy + 3
+            lx = max(0, min(img.size[0] - 1, lx))
+            ly = max(0, min(img.size[1] - 1, ly))
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((lx + dx, ly + dy), label, fill=(0, 0, 0), font=font)
+            draw.text((lx, ly), label, fill=color, font=font)
 
 
 def handle_get_image(
@@ -757,11 +854,23 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             ),
             types.Tool(
                 name="via_get_annotations",
-                description="Return all annotation metadata, optionally filtered by view ID.",
+                description=(
+                    "Return all annotation metadata, optionally filtered by view ID. "
+                    "format='pixel' (default) returns coords in original pixel space; "
+                    "'fraction' returns coords as 0–1 fractions of the original dims "
+                    "(useful for diffing your placements against user corrections "
+                    "without manual arithmetic); 'both' returns pixels plus an extra "
+                    "xy_fraction field per region."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "vid": {"type": "string", "description": "View ID to filter by (omit for all)"},
+                        "format": {
+                            "type": "string",
+                            "enum": ["pixel", "fraction", "both"],
+                            "default": "pixel",
+                        },
                     },
                     "required": [],
                 },
@@ -916,7 +1025,11 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             if name == "via_list_files":
                 return handle_list_files(store)
             if name == "via_get_annotations":
-                return handle_get_annotations(store, vid=arguments.get("vid"))
+                return handle_get_annotations(
+                    store, image_registry,
+                    vid=arguments.get("vid"),
+                    format=arguments.get("format", "pixel"),
+                )
             if name == "via_add_region":
                 return handle_add_region(
                     store, image_registry,
