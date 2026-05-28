@@ -110,6 +110,14 @@ class ProjectStore:
         if "vid_list" not in proj:
             proj["vid_list"] = list(p.get("view", {}).keys())
         proj.setdefault("data_format_version", "3.1.1")
-        p.setdefault("config", {}).setdefault("file", {}).setdefault(
+        cfg = p.setdefault("config", {})
+        cfg.setdefault("file", {}).setdefault(
             "loc_prefix", {"1": "", "2": "", "3": "", "4": ""}
         )
+        ui = cfg.setdefault("ui", {})
+        ui.setdefault("file_content_align", "center")
+        ui.setdefault("file_metadata_editor_visible", True)
+        ui.setdefault("spatial_metadata_editor_visible", True)
+        ui.setdefault("temporal_segment_metadata_editor_visible", True)
+        ui.setdefault("spatial_region_label_attribute_id", "")
+        ui.setdefault("gtimeline_visible_row_count", "4")
