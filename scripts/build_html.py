@@ -24,7 +24,7 @@ PATCHED_STORE_LINE = "const _VIA_REMOTE_STORE = 'http://localhost:__VIA_MCP_PORT
 
 AUTO_POLL_SNIPPET = """\
 <script>
-/* via-mcp: auto-pull when Claude writes new annotations */
+/* annotate: auto-pull when Claude writes new annotations */
 setInterval(async () => {
   const pid = via.d.store.project.pid;
   if (!pid || pid === '__VIA_PROJECT_ID__') return;

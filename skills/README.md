@@ -1,6 +1,6 @@
 # Claude Code Skills
 
-This skill teaches Claude how to work with the VIA image annotator and the via-mcp server.
+This skill teaches Claude how to work with the VIA image annotator and the annotate MCP server.
 
 ## Skills included
 

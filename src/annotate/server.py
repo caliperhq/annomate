@@ -1,5 +1,5 @@
 """
-via-mcp server — HTTP (VIA push/pull) + MCP stdio in one process.
+annotate server — HTTP (VIA push/pull) + MCP stdio in one process.
 """
 
 import argparse
@@ -231,7 +231,7 @@ def handle_add_file(
 
     fid = _next_id(project["file"])
     vid = _next_id(project["view"])
-    # abs_path is a via-mcp extension field; VIA ignores unknown keys
+    # abs_path is a annotate extension field; VIA ignores unknown keys
     project["file"][str(fid)] = {"fid": fid, "fname": fname, "type": 2, "loc": 2, "src": src, "abs_path": str(abs_path)}
     project["view"][str(vid)] = {"fid_list": [fid]}
     project["project"].setdefault("vid_list", []).append(str(vid))
@@ -320,7 +320,7 @@ def handle_save_project(store: ProjectStore, path: str) -> list[types.TextConten
 
 def main():
     parser = argparse.ArgumentParser(
-        description="via-mcp: MCP server + VIA image annotator on localhost"
+        description="annotate: MCP server + VIA image annotator on localhost"
     )
     parser.add_argument(
         "--port",
@@ -344,7 +344,7 @@ def main():
         state_file = Path(args.state_file)
     else:
         state_file = Path(
-            platformdirs.user_data_dir("via-mcp", appauthor=False)
+            platformdirs.user_data_dir("annotate", appauthor=False)
         ) / "project_state.json"
 
     html_template = (
@@ -368,11 +368,11 @@ def main():
     try:
         httpd = HTTPServer(("127.0.0.1", args.port), handler_cls)
     except OSError as e:
-        print(f"via-mcp: cannot bind port {args.port}: {e}", file=sys.stderr)
+        print(f"annotate: cannot bind port {args.port}: {e}", file=sys.stderr)
         sys.exit(1)
     actual_port = httpd.server_address[1]
     auto_pull_script = f"""<script>
-/* via-mcp: auto-load server project when VIA opens empty */
+/* annotate: auto-load server project when VIA opens empty */
 (async function() {{
   try {{
     if (Object.keys(via.d.store.file).length > 0) return;
@@ -398,7 +398,7 @@ def main():
 
 
 async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict) -> None:
-    mcp_server = mcp.server.Server("via-mcp")
+    mcp_server = mcp.server.Server("annotate")
 
     @mcp_server.list_tools()
     async def list_tools() -> list[types.Tool]:
