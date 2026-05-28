@@ -30,20 +30,102 @@ VIEW_RESET_FIX = "if ( this.d.store.project.vid_list.indexOf(current_vid) !== -1
 
 AUTO_POLL_SNIPPET = """\
 <script>
-/* annotate: auto-pull when Claude writes new annotations */
-setInterval(async () => {
-  const pid = via.d.store.project.pid;
-  if (!pid || pid === '__VIA_PROJECT_ID__') return;
-  try {
-    const r = await fetch('http://localhost:__VIA_MCP_PORT__/' + pid);
-    if (!r.ok) return;
-    const remote = await r.json();
-    if (remote.project.rev !== via.d.store.project.rev)
-      via.s.pull(pid);
-  } catch(e) {}
-}, 3000);
+/* annotate: incremental pull — avoid view_show reset on metadata-only changes.
+   Replaces the naive via.s.pull(pid), which triggers project_loaded →
+   view_show(vid_list[0]), bouncing the user back to the first file and
+   wiping in-progress UI state on every server write. */
+(function() {
+  var polling = false;
+  setInterval(async function() {
+    if (polling) return;
+    polling = true;
+    try {
+      var pid = via.d.store.project.pid;
+      if (!pid || pid === '__VIA_PROJECT_ID__') return;
+      var r = await fetch('http://localhost:__VIA_MCP_PORT__/' + pid);
+      if (!r.ok) return;
+      var remote = await r.json();
+      var local = via.d.store;
+      if (remote.project.rev === local.project.rev) return;
+
+      // Structural change (files/views/attributes/config)? Fall back to full pull.
+      var structural = ['file', 'view', 'attribute', 'config'];
+      for (var i = 0; i < structural.length; i++) {
+        var k = structural[i];
+        if (JSON.stringify(local[k]) !== JSON.stringify(remote[k])) {
+          via.s.pull(pid);
+          return;
+        }
+      }
+
+      // Metadata-only diff.
+      var oldMeta = local.metadata, newMeta = remote.metadata;
+      var added = [], updated = [], removedByVid = {};
+      for (var mid in newMeta) {
+        if (!(mid in oldMeta)) added.push(mid);
+        else if (JSON.stringify(oldMeta[mid]) !== JSON.stringify(newMeta[mid]))
+          updated.push(mid);
+      }
+      for (var mid in oldMeta) {
+        if (!(mid in newMeta)) {
+          var vid = oldMeta[mid].vid;
+          (removedByVid[vid] = removedByVid[vid] || []).push(mid);
+        }
+      }
+
+      // Patch store + reset merge baseline (mirror what via.s.pull does).
+      local.metadata = newMeta;
+      local.project.rev = remote.project.rev;
+      local.project.rev_timestamp = remote.project.rev_timestamp;
+      via.d.store0 = JSON.parse(JSON.stringify(local));
+
+      // Synthesize per-region events — file_annotator handles each
+      // incrementally (_creg_add + _creg_draw_all), no view re-init.
+      for (var i = 0; i < added.length; i++) {
+        var mid = added[i], vid = newMeta[mid].vid;
+        if (vid && local.view[vid])
+          via.d.emit_event('metadata_add', { vid: vid, mid: mid });
+      }
+      for (var i = 0; i < updated.length; i++) {
+        var mid = updated[i], vid = newMeta[mid].vid;
+        if (vid && local.view[vid])
+          via.d.emit_event('metadata_update', { vid: vid, mid: mid });
+      }
+      for (var vid in removedByVid)
+        via.d.emit_event('metadata_delete_bulk',
+                         { vid: vid, mid_list: removedByVid[vid] });
+    } catch(e) { /* swallow — next tick retries */ }
+    finally { polling = false; }
+  }, 3000);
+})();
 </script>
 """
+
+# project_loaded handler also resets to vid_list[0] unconditionally; patch it
+# to preserve current_vid when it's still present (covers the structural-change
+# fallback path through via.s.pull).
+PROJECT_LOADED_BUG = """_via_view_manager.prototype._on_event_project_loaded = function(data, event_payload) {
+  this._init_ui_elements();
+  this._view_selector_update();
+  if ( this.d.store.project.vid_list.length ) {
+    // show first view by default
+    this.va.view_show( this.d.store.project.vid_list[0] );
+  }
+}"""
+
+PROJECT_LOADED_FIX = """_via_view_manager.prototype._on_event_project_loaded = function(data, event_payload) {
+  var current_vid = this.va.vid;
+  this._init_ui_elements();
+  this._view_selector_update();
+  if ( this.d.store.project.vid_list.length ) {
+    if ( current_vid && this.d.store.project.vid_list.indexOf(current_vid) !== -1 ) {
+      this.va.view_show( current_vid );
+    } else {
+      // show first view by default
+      this.va.view_show( this.d.store.project.vid_list[0] );
+    }
+  }
+}"""
 
 
 def main():
@@ -76,6 +158,13 @@ def main():
             f"Upstream may have fixed it (check) or moved it; update VIEW_RESET_BUG in this script."
         )
     html = html.replace(VIEW_RESET_BUG, VIEW_RESET_FIX)
+
+    if PROJECT_LOADED_BUG not in html:
+        raise ValueError(
+            "Expected project_loaded handler not found in VIA HTML; "
+            "upstream may have moved it. Update PROJECT_LOADED_BUG in this script."
+        )
+    html = html.replace(PROJECT_LOADED_BUG, PROJECT_LOADED_FIX)
 
     html = html.replace("</body>", AUTO_POLL_SNIPPET + "</body>", 1)
 

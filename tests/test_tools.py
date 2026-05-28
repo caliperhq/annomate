@@ -610,15 +610,34 @@ def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
 
 # --- view-reset-bug regression (P0) ---
 
-def test_view_reset_bug_fix_present_in_html():
-    """Regression guard: the upstream JS uses `current_vid in vid_list` which
-    misbehaves on arrays. Our patcher must replace it with .indexOf."""
+def test_view_reset_fixes_present_in_html():
+    """Regression guard for the browser-reset-on-every-write friction reported
+    in 02-castillitos, 03-mangrove, and 04-haefeli-dh5 training sessions.
+
+    Three patches must all be present:
+      1. project_updated handler uses .indexOf (was `in` on array — wrong semantics).
+      2. project_loaded handler preserves current_vid (was unconditional vid_list[0]).
+      3. Auto-poll uses incremental metadata diff (was full via.s.pull → view re-init).
+    """
     from importlib.resources import files
     html = files("annotate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
+
+    # 1. project_updated handler
     assert "current_vid in this.d.store.project.vid_list" not in html, (
-        "Upstream view-reset bug regressed: rebuild HTML via scripts/build_html.py"
+        "Upstream `in`-on-array bug regressed in project_updated handler"
     )
     assert "vid_list.indexOf(current_vid) !== -1" in html
+
+    # 2. project_loaded handler preserves current_vid
+    assert "current_vid && this.d.store.project.vid_list.indexOf(current_vid)" in html, (
+        "project_loaded handler should preserve current_vid"
+    )
+
+    # 3. Incremental-pull snippet replaced the naive setInterval(via.s.pull)
+    assert "annotate: incremental pull" in html
+    assert "metadata_delete_bulk" in html  # synthesized event for removed regions
+    # the old naive pattern must be gone
+    assert "if (remote.project.rev !== via.d.store.project.rev)\n      via.s.pull(pid);" not in html
 
 
 # --- stale src URL heal ---
