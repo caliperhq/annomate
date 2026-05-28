@@ -4,10 +4,10 @@ This file provides guidance to Claude Code when working in this repository.
 
 ## What this is
 
-`via-mcp` is a Python MCP server that wraps VIA v3 (VGG Image Annotator).
+`annotate` is a Python MCP server that wraps VIA v3 (VGG Image Annotator).
 It runs two interfaces in one process:
-- HTTP on port 9669: implements VIA's push/pull share protocol + serves patched HTML
-- MCP stdio: exposes 7 annotation tools to Claude Code
+- HTTP (OS-assigned port): implements VIA's push/pull share protocol + serves patched HTML
+- MCP stdio: exposes 8 annotation tools to Claude Code
 
 Sister project to [jscad-mcp](https://github.com/caliperhq/jscad-mcp).
 
@@ -33,12 +33,22 @@ python -m build
 ```bash
 python -m venv venv && venv/bin/pip install -e ".[dev]"
 venv/bin/pytest          # run all tests
-venv/bin/annotate --no-browser   # start server
+venv/bin/annotate                # start server (add --browser to open browser)
+venv/bin/annotate --browser      # start server and open browser
 ```
 
 ## Tests
 
 Tests use `pytest`. No mocks — `test_http.py` spins up a real `HTTPServer` on a random port.
+
+## Skills
+
+`skills/via-annotator/SKILL.md` is the source of truth. After editing it, copy to the
+user-level install so Claude Code picks it up immediately:
+
+```bash
+cp skills/via-annotator/SKILL.md ~/.claude/skills/via-annotator/SKILL.md
+```
 
 ## VIA HTML token
 
