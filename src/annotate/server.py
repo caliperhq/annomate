@@ -42,6 +42,93 @@ def _gen_metadata_id(existing: dict) -> str:
             return mid
 
 
+def _normalize_av(project: dict, av: dict) -> tuple[dict | None, str | None]:
+    """Map aname keys to attribute IDs and validate against the schema.
+
+    Returns (fixed_av, error). If the schema is empty, accept keys as-is
+    (back-compat with bare/hand-rolled projects).
+    """
+    attributes = project.get("attribute", {})
+    if not attributes:
+        return {str(k): str(v) for k, v in av.items()}, None
+    aname_to_id = {
+        a.get("aname"): aid
+        for aid, a in attributes.items()
+        if a.get("aname")
+    }
+    fixed: dict = {}
+    unknown: list[str] = []
+    for k, v in av.items():
+        k = str(k)
+        if k in attributes:
+            fixed[k] = str(v)
+        elif k in aname_to_id:
+            fixed[aname_to_id[k]] = str(v)
+        else:
+            unknown.append(k)
+    if unknown:
+        valid = ", ".join(
+            f"'{aid}' (aname='{a.get('aname', '')}')"
+            for aid, a in attributes.items()
+        )
+        return None, (
+            f"Unknown av key(s): {unknown}. Valid keys are attribute IDs "
+            f"or anames. Schema has: {valid}"
+        )
+    return fixed, None
+
+
+def _resolve_fid_for_vid(project: dict, vid: str) -> str | None:
+    view = project.get("view", {}).get(str(vid))
+    if not view:
+        return None
+    fid_list = view.get("fid_list") or []
+    if not fid_list:
+        return None
+    return str(fid_list[0])
+
+
+def _image_dims(project: dict, image_registry: dict, fid: str) -> tuple[int, int] | None:
+    entry = project.get("file", {}).get(str(fid))
+    if not entry:
+        return None
+    abs_path = entry.get("abs_path") or image_registry.get(entry.get("fname", ""))
+    if not abs_path:
+        return None
+    from pathlib import Path as _Path
+    p = _Path(abs_path)
+    if not p.exists():
+        return None
+    from PIL import Image as PILImage
+    with PILImage.open(p) as img:
+        return img.size  # (w, h)
+
+
+def _scale_xy(xy: list, w: int, h: int) -> list:
+    """Scale fractional xy (0.0–1.0) into original pixel space.
+
+    Lengths (rectangle w/h, ellipse rx/ry) scale per-axis; circle radius
+    scales by the geometric mean to preserve aspect.
+    """
+    if not xy:
+        return xy
+    shape = xy[0]
+    coords = xy[1:]
+    if shape == 2 and len(coords) == 4:  # rect [x, y, w, h]
+        x, y, rw, rh = coords
+        return [shape, x * w, y * h, rw * w, rh * h]
+    if shape == 3 and len(coords) == 3:  # circle [cx, cy, r]
+        cx, cy, r = coords
+        return [shape, cx * w, cy * h, r * ((w + h) / 2)]
+    if shape == 4 and len(coords) == 4:  # ellipse [cx, cy, rx, ry]
+        cx, cy, rx, ry = coords
+        return [shape, cx * w, cy * h, rx * w, ry * h]
+    out: list = [shape]
+    for i, c in enumerate(coords):
+        out.append(c * (w if i % 2 == 0 else h))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Helpers for project structure
 # ---------------------------------------------------------------------------
@@ -139,10 +226,12 @@ def handle_get_annotations(
 
 def handle_add_region(
     store: ProjectStore,
+    image_registry: dict,
     vid: str,
     z: list,
     xy: list,
     av: dict,
+    xy_space: str = "original",
 ) -> list[types.TextContent]:
     project = store.get()
     if project is None:
@@ -151,26 +240,43 @@ def handle_add_region(
         return _text(f"'av' must be a dict, got {type(av).__name__}")
     if vid not in project.get("view", {}):
         return _text(f"View '{vid}' not found. Use via_list_files to see available views.")
+    fixed_av, err = _normalize_av(project, av)
+    if err:
+        return _text(err)
+    if xy_space == "fraction":
+        fid = _resolve_fid_for_vid(project, vid)
+        dims = _image_dims(project, image_registry, fid) if fid else None
+        if dims is None:
+            return _text(
+                f"xy_space='fraction' requires image dims for vid={vid}; "
+                "image path is unavailable. Use xy_space='original' or load the file via via_add_file."
+            )
+        xy = _scale_xy(xy, dims[0], dims[1])
+    elif xy_space != "original":
+        return _text(f"xy_space must be 'original' or 'fraction', got {xy_space!r}")
     mid = _gen_metadata_id(project["metadata"])
     project["metadata"][mid] = {
         "vid": vid,
         "flg": 0,
         "z": z,
         "xy": xy,
-        "av": {str(k): str(v) for k, v in av.items()},
+        "av": fixed_av,
     }
     # set_project() is a last-write-wins overwrite; concurrent browser pushes will
     # see ProjectConflictError on next sync and re-pull.
     store.set_project(project)
-    return _text(json.dumps({"metadata_id": mid}))
+    label = fixed_av.get("1", "")
+    return _text(json.dumps({"metadata_id": mid, "label": label}))
 
 
 def handle_update_region(
     store: ProjectStore,
+    image_registry: dict,
     metadata_id: str,
     z: list,
     xy: list,
     av: dict,
+    xy_space: str = "original",
 ) -> list[types.TextContent]:
     project = store.get()
     if project is None:
@@ -179,9 +285,23 @@ def handle_update_region(
         return _text(f"'av' must be a dict, got {type(av).__name__}")
     if metadata_id not in project.get("metadata", {}):
         return _text(f"Metadata ID '{metadata_id}' not found.")
+    fixed_av, err = _normalize_av(project, av)
+    if err:
+        return _text(err)
+    if xy_space == "fraction":
+        vid = project["metadata"][metadata_id].get("vid")
+        fid = _resolve_fid_for_vid(project, vid) if vid else None
+        dims = _image_dims(project, image_registry, fid) if fid else None
+        if dims is None:
+            return _text(
+                f"xy_space='fraction' requires image dims; could not resolve for metadata_id={metadata_id}."
+            )
+        xy = _scale_xy(xy, dims[0], dims[1])
+    elif xy_space != "original":
+        return _text(f"xy_space must be 'original' or 'fraction', got {xy_space!r}")
     project["metadata"][metadata_id]["z"] = z
     project["metadata"][metadata_id]["xy"] = xy
-    project["metadata"][metadata_id]["av"] = {str(k): str(v) for k, v in av.items()}
+    project["metadata"][metadata_id]["av"] = fixed_av
     store.set_project(project)
     return _text("Updated.")
 
@@ -255,11 +375,94 @@ def handle_update_project(
     return _text("Project updated.")
 
 
+_OVERLAY_PALETTE = [
+    (255, 60, 60), (60, 200, 60), (60, 140, 255), (255, 180, 40),
+    (220, 60, 220), (40, 220, 220), (255, 120, 40), (160, 100, 255),
+]
+
+
+def _draw_overlay(img, project: dict, fid: str) -> None:
+    """Draw all regions belonging to views referencing `fid` onto img (in-place).
+    Coordinates in project metadata are original-space; img may be downscaled,
+    so we scale per-axis.
+    """
+    from PIL import ImageDraw, ImageFont
+    view_to_fids = {
+        vid: [str(x) for x in v.get("fid_list", [])]
+        for vid, v in project.get("view", {}).items()
+    }
+    relevant = [
+        (mid, m) for mid, m in project.get("metadata", {}).items()
+        if str(fid) in view_to_fids.get(m.get("vid", ""), [])
+    ]
+    if not relevant:
+        return
+    # find original dims from the file entry
+    entry = project.get("file", {}).get(str(fid), {})
+    # Caller already opened/resized; we infer scale from the image vs original.
+    # The original dims come from PIL before resize, passed in via attrs we set.
+    orig_w = getattr(img, "_overlay_orig_w", img.size[0])
+    orig_h = getattr(img, "_overlay_orig_h", img.size[1])
+    sx = img.size[0] / orig_w
+    sy = img.size[1] / orig_h
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    for i, (mid, m) in enumerate(relevant):
+        xy = m.get("xy") or []
+        if not xy or not isinstance(xy[0], (int, float)):
+            continue
+        shape = int(xy[0]) if xy[0] == int(xy[0]) else 0
+        coords = xy[1:]
+        color = _OVERLAY_PALETTE[i % len(_OVERLAY_PALETTE)]
+        label = (m.get("av") or {}).get("1", "")
+        anchor = None
+        try:
+            if shape == 1 and len(coords) >= 2:  # point
+                x, y = coords[0] * sx, coords[1] * sy
+                r = 4
+                draw.ellipse([x - r, y - r, x + r, y + r], outline=color, width=2)
+                anchor = (x, y)
+            elif shape == 2 and len(coords) >= 4:  # rect [x, y, w, h]
+                x, y = coords[0] * sx, coords[1] * sy
+                w, h = coords[2] * sx, coords[3] * sy
+                draw.rectangle([x, y, x + w, y + h], outline=color, width=2)
+                anchor = (x, y)
+            elif shape == 3 and len(coords) >= 3:  # circle [cx, cy, r]
+                cx, cy = coords[0] * sx, coords[1] * sy
+                r = coords[2] * ((sx + sy) / 2)
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=2)
+                anchor = (cx - r, cy - r)
+            elif shape == 4 and len(coords) >= 4:  # ellipse [cx, cy, rx, ry]
+                cx, cy = coords[0] * sx, coords[1] * sy
+                rx, ry = coords[2] * sx, coords[3] * sy
+                draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], outline=color, width=2)
+                anchor = (cx - rx, cy - ry)
+            elif shape in (6, 7) and len(coords) >= 4:  # polyline / polygon
+                pts = [(coords[i] * sx, coords[i + 1] * sy) for i in range(0, len(coords) - 1, 2)]
+                if shape == 7 and len(pts) >= 3:
+                    draw.polygon(pts, outline=color, width=2)
+                else:
+                    draw.line(pts, fill=color, width=2)
+                anchor = pts[0]
+        except (TypeError, IndexError):
+            continue
+        if label and anchor is not None:
+            tx, ty = anchor[0] + 3, max(0, anchor[1] - 12)
+            # cheap text shadow for legibility
+            for ox, oy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((tx + ox, ty + oy), label, fill=(0, 0, 0), font=font)
+            draw.text((tx, ty), label, fill=color, font=font)
+
+
 def handle_get_image(
     store: ProjectStore,
     image_registry: dict,
     fid: str,
-    max_dim: int = 1024,
+    max_dim: int = 2048,
+    overlay: bool = False,
 ) -> list:
     from PIL import Image as PILImage
     project = store.get()
@@ -286,6 +489,13 @@ def handle_get_image(
             img = img.resize((display_w, display_h), PILImage.LANCZOS)
         if orig_fmt == "JPEG" and img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
+        if overlay:
+            # ensure we can draw colored shapes on JPEGs
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img._overlay_orig_w = orig_w
+            img._overlay_orig_h = orig_h
+            _draw_overlay(img, project, str(fid))
         buf = io.BytesIO()
         img.save(buf, format=orig_fmt)
         data = base64.b64encode(buf.getvalue()).decode()
@@ -294,6 +504,7 @@ def handle_get_image(
         f"Image fid={fid} fname={file_entry.get('fname')} "
         f"original={orig_w}×{orig_h}px"
         + (f" returned={display_w}×{display_h}px" if (display_w, display_h) != (orig_w, orig_h) else "")
+        + (" overlay=on (existing regions drawn)" if overlay else "")
         + ". Coordinates you provide must be in original pixel space."
     )
     return [
@@ -371,6 +582,30 @@ def main():
         print(f"annotate: cannot bind port {args.port}: {e}", file=sys.stderr)
         sys.exit(1)
     actual_port = httpd.server_address[1]
+
+    # Heal stale localhost src URLs from prior sessions whose port is now wrong.
+    # abs_path is preserved per file entry, so we just rewrite src to the new port.
+    if existing:
+        import re as _re
+        changed = False
+        for entry in existing.get("file", {}).values():
+            src = entry.get("src", "") or ""
+            fname = entry.get("fname", "")
+            if (
+                entry.get("loc") == 2
+                and fname
+                and _re.match(r"^http://localhost:\d+/img/", src)
+            ):
+                expected = f"http://localhost:{actual_port}/img/{fname}"
+                if src != expected:
+                    entry["src"] = expected
+                    changed = True
+        if changed:
+            store.set_project(existing)
+            print(
+                f"annotate: healed stale src URLs to port {actual_port}",
+                file=sys.stderr,
+            )
     auto_pull_script = f"""<script>
 /* annotate: auto-load server project when VIA opens empty */
 (async function() {{
@@ -450,7 +685,10 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 description=(
                     "Add one annotation region. xy encoding: rectangle=[2,x,y,w,h], "
                     "point=[1,x,y], circle=[3,cx,cy,r], polygon=[7,x1,y1,x2,y2,...]. "
-                    "Coordinates are image pixel space. av values must be strings."
+                    "Coordinates default to original pixel space; pass xy_space='fraction' "
+                    "to use 0.0–1.0 values that the server scales by the original image dims. "
+                    "av keys may be attribute IDs ('1','2',...) or anames ('label','description'); "
+                    "unknown keys are rejected (use via_get_project to see the schema)."
                 ),
                 inputSchema={
                     "type": "object",
@@ -459,13 +697,22 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "z": {"type": "array", "items": {"type": "number"}, "description": "Temporal coords ([] for images)"},
                         "xy": {"type": "array", "items": {"type": "number"}, "description": "[shape_id, ...coords]"},
                         "av": {"type": "object", "description": "Attribute key-value pairs (strings)", "additionalProperties": {"type": "string"}},
+                        "xy_space": {
+                            "type": "string",
+                            "enum": ["original", "fraction"],
+                            "description": "'original' = pixel coords (default); 'fraction' = 0.0–1.0 of original dims",
+                            "default": "original",
+                        },
                     },
                     "required": ["vid", "z", "xy", "av"],
                 },
             ),
             types.Tool(
                 name="via_update_region",
-                description="Replace an existing annotation region's z, xy, and av fields.",
+                description=(
+                    "Replace an existing annotation region's z, xy, and av fields. "
+                    "Same xy_space and av-key handling as via_add_region."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -473,6 +720,11 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "z": {"type": "array", "items": {"type": "number"}},
                         "xy": {"type": "array", "items": {"type": "number"}},
                         "av": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "xy_space": {
+                            "type": "string",
+                            "enum": ["original", "fraction"],
+                            "default": "original",
+                        },
                     },
                     "required": ["metadata_id", "z", "xy", "av"],
                 },
@@ -503,15 +755,17 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 name="via_get_image",
                 description=(
                     "Return the image so you can see what you are annotating. "
-                    "Always call this before adding regions — you need to see the image to place accurate coordinates. "
-                    "Returns the original pixel dimensions (use these for all coordinates) plus the image, "
-                    "downscaled to max_dim on the longest edge for context efficiency."
+                    "Always call before placing coordinates. Returns original pixel dims "
+                    "(use these for all coordinates) plus the image, downscaled to max_dim "
+                    "on the longest edge for context efficiency. Pass overlay=true to draw "
+                    "existing regions on the returned image — use this to verify placements."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "fid": {"type": "string", "description": "File ID from via_list_files or via_add_file"},
-                        "max_dim": {"type": "integer", "description": "Limit longest edge to this many pixels for context efficiency (default 1024)", "default": 1024},
+                        "max_dim": {"type": "integer", "description": "Limit longest edge to this many pixels (default 2048; drop to 1024 for context savings on large images with no small features)", "default": 2048},
+                        "overlay": {"type": "boolean", "description": "Draw existing regions onto the returned image (default false)", "default": False},
                     },
                     "required": ["fid"],
                 },
@@ -545,19 +799,21 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_get_annotations(store, vid=arguments.get("vid"))
             if name == "via_add_region":
                 return handle_add_region(
-                    store,
+                    store, image_registry,
                     vid=arguments["vid"],
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
+                    xy_space=arguments.get("xy_space", "original"),
                 )
             if name == "via_update_region":
                 return handle_update_region(
-                    store,
+                    store, image_registry,
                     metadata_id=arguments["metadata_id"],
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
+                    xy_space=arguments.get("xy_space", "original"),
                 )
             if name == "via_delete_region":
                 return handle_delete_region(store, metadata_id=arguments["metadata_id"])
@@ -567,7 +823,8 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_get_image(
                     store, image_registry,
                     fid=arguments["fid"],
-                    max_dim=int(arguments.get("max_dim", 1024)),
+                    max_dim=int(arguments.get("max_dim", 2048)),
+                    overlay=bool(arguments.get("overlay", False)),
                 )
             if name == "via_save_project":
                 return handle_save_project(store, path=arguments["path"])
