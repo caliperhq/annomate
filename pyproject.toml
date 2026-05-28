@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "annotate"
+version = "0.1.0-dev"
+description = "MCP server for VIA v3 — lets Claude read and write image annotations in real time"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+keywords = ["via", "vgg", "annotation", "mcp", "model-context-protocol", "claude", "image-annotation"]
+dependencies = [
+    "mcp>=1.27,<2.0",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+annotate = "via_mcp.server:main"
+
+[project.urls]
+Repository = "https://github.com/caliperhq/annotate"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+via_mcp = ["via_image_annotator.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

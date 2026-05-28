@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "via": {
+      "command": "/home/mike/caliperhq/annotate/venv/bin/annotate"
+    }
+  }
+}
