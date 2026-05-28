@@ -403,6 +403,8 @@ def _draw_overlay(img, project: dict, fid: str) -> None:
     # The original dims come from PIL before resize, passed in via attrs we set.
     orig_w = getattr(img, "_overlay_orig_w", img.size[0])
     orig_h = getattr(img, "_overlay_orig_h", img.size[1])
+    ox = getattr(img, "_overlay_offset_x", 0)
+    oy = getattr(img, "_overlay_offset_y", 0)
     sx = img.size[0] / orig_w
     sy = img.size[1] / orig_h
     draw = ImageDraw.Draw(img)
@@ -421,27 +423,28 @@ def _draw_overlay(img, project: dict, fid: str) -> None:
         anchor = None
         try:
             if shape == 1 and len(coords) >= 2:  # point
-                x, y = coords[0] * sx, coords[1] * sy
+                x, y = (coords[0] - ox) * sx, (coords[1] - oy) * sy
                 r = 4
                 draw.ellipse([x - r, y - r, x + r, y + r], outline=color, width=2)
                 anchor = (x, y)
             elif shape == 2 and len(coords) >= 4:  # rect [x, y, w, h]
-                x, y = coords[0] * sx, coords[1] * sy
+                x, y = (coords[0] - ox) * sx, (coords[1] - oy) * sy
                 w, h = coords[2] * sx, coords[3] * sy
                 draw.rectangle([x, y, x + w, y + h], outline=color, width=2)
                 anchor = (x, y)
             elif shape == 3 and len(coords) >= 3:  # circle [cx, cy, r]
-                cx, cy = coords[0] * sx, coords[1] * sy
+                cx, cy = (coords[0] - ox) * sx, (coords[1] - oy) * sy
                 r = coords[2] * ((sx + sy) / 2)
                 draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=2)
                 anchor = (cx - r, cy - r)
             elif shape == 4 and len(coords) >= 4:  # ellipse [cx, cy, rx, ry]
-                cx, cy = coords[0] * sx, coords[1] * sy
+                cx, cy = (coords[0] - ox) * sx, (coords[1] - oy) * sy
                 rx, ry = coords[2] * sx, coords[3] * sy
                 draw.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], outline=color, width=2)
                 anchor = (cx - rx, cy - ry)
             elif shape in (6, 7) and len(coords) >= 4:  # polyline / polygon
-                pts = [(coords[i] * sx, coords[i + 1] * sy) for i in range(0, len(coords) - 1, 2)]
+                pts = [((coords[i] - ox) * sx, (coords[i + 1] - oy) * sy)
+                       for i in range(0, len(coords) - 1, 2)]
                 if shape == 7 and len(pts) >= 3:
                     draw.polygon(pts, outline=color, width=2)
                 else:
@@ -506,6 +509,89 @@ def handle_get_image(
         + (f" returned={display_w}×{display_h}px" if (display_w, display_h) != (orig_w, orig_h) else "")
         + (" overlay=on (existing regions drawn)" if overlay else "")
         + ". Coordinates you provide must be in original pixel space."
+    )
+    return [
+        types.TextContent(type="text", text=header),
+        types.ImageContent(type="image", data=data, mimeType=mime),
+    ]
+
+
+def handle_get_image_crop(
+    store: ProjectStore,
+    image_registry: dict,
+    fid: str,
+    bbox: list,
+    xy_space: str = "original",
+    max_dim: int = 2048,
+    overlay: bool = False,
+) -> list:
+    """Return a high-resolution crop of the original image.
+
+    Use when a region of the full image is too small to verify at the
+    standard downscaled resolution. The crop is taken from the *original*
+    image, then downscaled only if it still exceeds max_dim.
+    """
+    from PIL import Image as PILImage
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID '{fid}' not found. Use via_list_files to see available files.")
+    abs_path = file_entry.get("abs_path") or image_registry.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return _text(f"Image path not available for fid={fid}.")
+    from pathlib import Path as _Path
+    p = _Path(abs_path)
+    if not p.exists():
+        return _text(f"Image file not found at {abs_path}")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return _text("bbox must be [x, y, w, h]")
+    if xy_space not in ("original", "fraction"):
+        return _text(f"xy_space must be 'original' or 'fraction', got {xy_space!r}")
+    with PILImage.open(p) as img:
+        orig_w, orig_h = img.size
+        orig_fmt = img.format or "JPEG"
+        x, y, w, h = bbox
+        if xy_space == "fraction":
+            x, w = x * orig_w, w * orig_w
+            y, h = y * orig_h, h * orig_h
+        x = max(0, min(orig_w - 1, x))
+        y = max(0, min(orig_h - 1, y))
+        w = max(1, min(orig_w - x, w))
+        h = max(1, min(orig_h - y, h))
+        crop = img.crop((int(x), int(y), int(x + w), int(y + h)))
+        crop_w, crop_h = crop.size
+        display_w, display_h = crop_w, crop_h
+        if max_dim and max(crop_w, crop_h) > max_dim:
+            scale = max_dim / max(crop_w, crop_h)
+            display_w = round(crop_w * scale)
+            display_h = round(crop_h * scale)
+            crop = crop.resize((display_w, display_h), PILImage.LANCZOS)
+        if orig_fmt == "JPEG" and crop.mode in ("RGBA", "P"):
+            crop = crop.convert("RGB")
+        if overlay:
+            if crop.mode != "RGB":
+                crop = crop.convert("RGB")
+            crop._overlay_orig_w = crop_w
+            crop._overlay_orig_h = crop_h
+            crop._overlay_offset_x = int(x)
+            crop._overlay_offset_y = int(y)
+            _draw_overlay(crop, project, str(fid))
+        buf = io.BytesIO()
+        crop.save(buf, format=orig_fmt)
+        data = base64.b64encode(buf.getvalue()).decode()
+    mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
+    header = (
+        f"Crop fid={fid} fname={file_entry.get('fname')} "
+        f"window=({int(x)},{int(y)},{int(w)}×{int(h)}) of original {orig_w}×{orig_h}px"
+        + (f" returned={display_w}×{display_h}px" if (display_w, display_h) != (crop_w, crop_h) else "")
+        + (" overlay=on" if overlay else "")
+        + ". Writes still address the full image, not this crop. "
+        f"For xy_space='original' coords measured inside this crop: "
+        f"add ({int(x)}, {int(y)}) to (x, y). "
+        f"For xy_space='fraction': always compute against the full {orig_w}×{orig_h} dims, "
+        f"never against the crop window."
     )
     return [
         types.TextContent(type="text", text=header),
@@ -771,6 +857,40 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_get_image_crop",
+                description=(
+                    "Return a high-resolution crop of the original image. Use when you "
+                    "need to verify a small feature or a suspected mis-placement and the "
+                    "standard via_get_image returned the area too downscaled to judge. "
+                    "bbox is [x, y, w, h]; xy_space='fraction' (0.0–1.0 of original dims) "
+                    "is usually easiest after eyeballing the area on a prior via_get_image. "
+                    "The crop is taken from the full-res original, then downscaled only "
+                    "if it still exceeds max_dim. Pass overlay=true to draw existing "
+                    "regions on the crop."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "bbox": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 4,
+                            "maxItems": 4,
+                            "description": "[x, y, w, h] in the chosen xy_space",
+                        },
+                        "xy_space": {
+                            "type": "string",
+                            "enum": ["original", "fraction"],
+                            "default": "original",
+                        },
+                        "max_dim": {"type": "integer", "default": 2048},
+                        "overlay": {"type": "boolean", "default": False},
+                    },
+                    "required": ["fid", "bbox"],
+                },
+            ),
+            types.Tool(
                 name="via_save_project",
                 description="Write the current project JSON to a file on disk. Use when the user asks to save or export their work.",
                 inputSchema={
@@ -823,6 +943,15 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_get_image(
                     store, image_registry,
                     fid=arguments["fid"],
+                    max_dim=int(arguments.get("max_dim", 2048)),
+                    overlay=bool(arguments.get("overlay", False)),
+                )
+            if name == "via_get_image_crop":
+                return handle_get_image_crop(
+                    store, image_registry,
+                    fid=arguments["fid"],
+                    bbox=arguments["bbox"],
+                    xy_space=arguments.get("xy_space", "original"),
                     max_dim=int(arguments.get("max_dim", 2048)),
                     overlay=bool(arguments.get("overlay", False)),
                 )

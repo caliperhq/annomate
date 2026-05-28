@@ -41,6 +41,7 @@ actually inside *that* box — not merely somewhere in the image.
 | Get annotator URL | `via_get_annotator_url` |
 | Load an image into the project | `via_add_file` |
 | **See the image you're annotating** | `via_get_image` |
+| Zoom into a sub-region at full res | `via_get_image_crop` |
 | Orient to project | `via_get_project` |
 | Quick file list | `via_list_files` |
 | Read annotations | `via_get_annotations` |
@@ -144,22 +145,31 @@ The `xy` field is an array where the first element is the shape ID:
 
 Coordinates are **image pixel space**, not browser canvas space.
 
-### Coordinate space — `original` vs `fraction`
+### Coordinate space — prefer `xy_space="fraction"`
 
 `via_add_region` and `via_update_region` accept an optional `xy_space`:
 
-- `"original"` (default) — the coords in `xy` are pixels in the original image.
 - `"fraction"` — coords are 0.0–1.0 fractions of the original dims; the server
-  scales them. Rect `w`/`h` and ellipse `rx`/`ry` scale per-axis; circle `r`
-  scales by the geometric mean.
+  scales them for you. **Prefer this** — every multi-region session that used
+  fractions has hit zero arithmetic errors. Read positions off the returned
+  image proportionally ("about 40% from the left, 60% down") and pass the
+  fractions through. Rect `w`/`h` and ellipse `rx`/`ry` scale per-axis;
+  circle `r` scales by the geometric mean.
+- `"original"` (default) — coords in `xy` are pixels in the *original* image.
+  Kept as the default for back-compat; you have to do the
+  returned-px-to-original-px multiplication yourself.
 
-Use `"fraction"` to avoid manual arithmetic when working from a downscaled image.
-
-**Worked transform (for `xy_space="original"`):**
+**If you must use `"original"`:**
 Returned image 1024×683, original 4651×3101. A feature observed at returned
 (500, 300) is at original `(500 × 4651/1024, 300 × 3101/683)` ≈ `(2271, 1362)`.
-Multiply per axis by `original_dim / returned_dim`. Or just use `xy_space="fraction"`
-and pass `(500/1024, 300/683)` ≈ `(0.488, 0.439)` — same destination, no arithmetic.
+Multiply per axis by `original_dim / returned_dim`. Or just use
+`xy_space="fraction"` and pass `(500/1024, 300/683)` ≈ `(0.488, 0.439)` — same
+destination, no arithmetic.
+
+**Thin diagonal features (struts, wires, ropes, poles, branches)** want the
+polyline encoding `[6, x1, y1, x2, y2]`, not an axis-aligned rectangle. A
+bounding rect around a diagonal will be visibly off at both ends; the polyline
+sits on the feature.
 
 **Note on user-drawn regions:** Browser-drawn regions occasionally arrive without
 a shape-ID prefix if the browser saved an in-progress draw state — the first element
@@ -273,6 +283,38 @@ def polyline_to_band(points, half_width):
     return [7] + [c for pt in poly for c in pt]
 ```
 
+## Perception gotchas
+
+Errors that have shown up repeatedly across sessions and survived the overlay
+check. Each one costs a user-correction round if you don't watch for it.
+
+**Reflections are separate regions.** On still water, glass, polished floors,
+or any mirror surface, the reflection is its own visual region — not part of
+the object it reflects. A box for "tree" must not extend into the inverted
+mirror of the tree below the waterline, even though the two look visually
+identical. If the image has a reflective surface, add a separate region for
+the reflection rather than letting an object box swallow it.
+
+**Verify identity, not just position.** For named-part labels (windscreen,
+lens, helmet, eye, cockpit), ask "does this shape actually *look like* the
+thing I'm calling it?" — a "windscreen" should be visibly transparent; a
+"helmet" should be solid; an "eye" should have a pupil. The overlay check
+confirms a box is in the right neighborhood; it does *not* catch you labeling
+the helmeted head "windscreen" because the prior expected one nearby. One
+session shipped a complete pilot↔windscreen label swap that overlay passed.
+
+**Overlay is necessary but not sufficient.** The overlay renders at returned-
+image resolution; you're judging placements at coarser spatial fidelity than
+the user sees in the browser at full resolution. Before declaring done /
+saving / handing off, pause and let the user spot-check in the browser. Most
+errors that survive overlay are caught by the user in ~5 seconds.
+
+**Use `via_get_image_crop` when overlay is ambiguous.** If a placement looks
+"close" on overlay but you're not sure, call `via_get_image_crop(fid, bbox)`
+on the area at full resolution. The crop is taken from the original image,
+so a 500×500 window inside a 4651×3101 photo comes back at native pixel
+density, not the heavily-downscaled view.
+
 ## Common Patterns
 
 **"Annotate this image" / "Load img002.jpg"**
@@ -286,6 +328,10 @@ def polyline_to_band(points, half_width):
 
 **"Review my annotations for consistency"**
 → `via_get_image(fid)` + `via_get_annotations`, then reason over both
+
+**"That box looks off — let me check"**
+→ `via_get_image_crop(fid, bbox, xy_space="fraction", overlay=true)`
+on the suspected area; full-res crop reveals what the downscaled overlay hid
 
 **"Re-annotate everything based on..."**
 → `via_update_project` with the full modified project JSON

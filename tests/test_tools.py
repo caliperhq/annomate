@@ -15,6 +15,7 @@ from annotate.server import (
     handle_update_project,
     handle_add_file,
     handle_get_image,
+    handle_get_image_crop,
     handle_save_project,
 )
 
@@ -511,6 +512,113 @@ def test_get_image_no_overlay_by_default(store_with_schema):
     store, _ = store_with_schema
     result = handle_get_image(store, {}, fid="1")
     assert "overlay=on" not in result[0].text
+
+
+# --- via_get_image_crop ---
+
+@pytest.fixture
+def store_with_big_image(store, tmp_path):
+    """4000×2000 image — large enough that 2048 max_dim downscales it."""
+    from PIL import Image as PILImage
+    img_path = tmp_path / "big.jpg"
+    PILImage.new("RGB", (4000, 2000), color=(128, 128, 128)).save(img_path, "JPEG")
+    registry = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    return store, registry, img_path
+
+
+def test_get_image_crop_no_project(store):
+    result = handle_get_image_crop(store, {}, fid="1", bbox=[0, 0, 10, 10])
+    assert "No project" in _text(result)
+
+
+def test_get_image_crop_unknown_fid(loaded_store):
+    result = handle_get_image_crop(loaded_store, {}, fid="99", bbox=[0, 0, 10, 10])
+    assert "not found" in _text(result).lower()
+
+
+def test_get_image_crop_bad_bbox(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    result = handle_get_image_crop(store, registry, fid="1", bbox=[0, 0, 10])
+    assert "bbox" in _text(result)
+
+
+def test_get_image_crop_bad_xy_space(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[0, 0, 100, 100], xy_space="garbage")
+    assert "xy_space" in _text(result)
+
+
+def test_get_image_crop_original_coords(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[500, 400, 600, 300])
+    assert len(result) == 2
+    assert "window=(500,400,600×300)" in result[0].text
+    assert isinstance(result[1], types.ImageContent)
+    assert len(result[1].data) > 0
+    # 600×300 crop fits under max_dim=2048 — no downscale note
+    assert "returned=" not in result[0].text
+
+
+def test_get_image_crop_fraction_coords(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    # 0.25..0.75 in x of 4000 → 1000..3000 (window 1000,_,2000,_)
+    # 0.1..0.5 in y of 2000 → 200..1000 (window _,200,_,800)
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[0.25, 0.1, 0.5, 0.4],
+                                    xy_space="fraction")
+    assert "window=(1000,200,2000×800)" in result[0].text
+
+
+def test_get_image_crop_downscales_large_window(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    # 3000×1500 crop > 2048 → downscaled to 2048×1024
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[0, 0, 3000, 1500])
+    assert "returned=2048×1024" in result[0].text
+
+
+def test_get_image_crop_clips_to_image_bounds(store_with_big_image):
+    store, registry, _ = store_with_big_image
+    # bbox extends past the right/bottom — should clip
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[3800, 1900, 500, 500])
+    # max remaining after (3800, 1900) is (200, 100)
+    assert "200×100" in result[0].text
+
+
+def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
+    """Region at original (1000,500,200,200) should land inside a crop starting
+    at (900,400). Overlay draws are smoke-tested by inspecting the rendered crop:
+    we just verify the call succeeds and the response advertises overlay=on.
+    """
+    from PIL import Image as PILImage
+    img_path = tmp_path / "big.jpg"
+    PILImage.new("RGB", (4000, 2000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    handle_add_region(store, {}, vid="1", z=[], xy=[2, 1000, 500, 200, 200],
+                      av={"label": "target"})
+    result = handle_get_image_crop(store, registry, fid="1",
+                                    bbox=[900, 400, 500, 500], overlay=True)
+    assert "overlay=on" in result[0].text
+    assert isinstance(result[1], types.ImageContent)
+    assert len(result[1].data) > 0
+
+
+# --- view-reset-bug regression (P0) ---
+
+def test_view_reset_bug_fix_present_in_html():
+    """Regression guard: the upstream JS uses `current_vid in vid_list` which
+    misbehaves on arrays. Our patcher must replace it with .indexOf."""
+    from importlib.resources import files
+    html = files("annotate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
+    assert "current_vid in this.d.store.project.vid_list" not in html, (
+        "Upstream view-reset bug regressed: rebuild HTML via scripts/build_html.py"
+    )
+    assert "vid_list.indexOf(current_vid) !== -1" in html
 
 
 # --- stale src URL heal ---

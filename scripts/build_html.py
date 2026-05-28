@@ -22,6 +22,12 @@ VIA_VERSION_DIR = "via-3.x.y"
 REMOTE_STORE_LINE = "const _VIA_REMOTE_STORE = 'https://zeus.robots.ox.ac.uk/via/store/3.x.y/';"
 PATCHED_STORE_LINE = "const _VIA_REMOTE_STORE = 'http://localhost:__VIA_MCP_PORT__/';"
 
+# Upstream VIA bug: `current_vid in vid_list` uses JS `in` (index check) on an array,
+# so on every project update the browser falls back to vid_list[0] unless the user
+# happens to be on a vid whose value matches a valid array index. Fix to .indexOf.
+VIEW_RESET_BUG = "if ( current_vid in this.d.store.project.vid_list ) {"
+VIEW_RESET_FIX = "if ( this.d.store.project.vid_list.indexOf(current_vid) !== -1 ) {"
+
 AUTO_POLL_SNIPPET = """\
 <script>
 /* annotate: auto-pull when Claude writes new annotations */
@@ -63,6 +69,14 @@ def main():
         )
 
     html = html.replace(REMOTE_STORE_LINE, PATCHED_STORE_LINE)
+
+    if VIEW_RESET_BUG not in html:
+        raise ValueError(
+            f"Expected view-reset bug line not found in VIA HTML:\n  {VIEW_RESET_BUG}\n"
+            f"Upstream may have fixed it (check) or moved it; update VIEW_RESET_BUG in this script."
+        )
+    html = html.replace(VIEW_RESET_BUG, VIEW_RESET_FIX)
+
     html = html.replace("</body>", AUTO_POLL_SNIPPET + "</body>", 1)
 
     VIA_HTML_DST.parent.mkdir(parents=True, exist_ok=True)
