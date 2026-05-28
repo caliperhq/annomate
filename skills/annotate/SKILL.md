@@ -34,6 +34,13 @@ exemplifies some feature ("this rosette shows the diagnostic interior dot"),
 re-look at the box after placing it and verify that the cited feature is
 actually inside *that* box — not merely somewhere in the image.
 
+**Batching granularity.** Images with clean spatial separation between
+features (each feature has a clear centre and clean edges) tolerate one-shot
+parallel batched placement — 10+ regions in one call, no inter-region
+feedback needed. Images with overlapping, occluded, or scale-ambiguous
+features want iterative batches of 2–3 with an overlay check between them.
+If you're not sure which kind of image you have, start with a small batch.
+
 ## Tool Quick Reference
 
 | Situation | Tool |
@@ -171,6 +178,18 @@ polyline encoding `[6, x1, y1, x2, y2]`, not an axis-aligned rectangle. A
 bounding rect around a diagonal will be visibly off at both ends; the polyline
 sits on the feature.
 
+**Linear-but-wide features (paths, stair flights, streams, road surfaces)**
+want the polygon footprint `[7, x1, y1, x2, y2, ...]`, not a polyline along
+the centreline. A thin polyline beside an irregular wide feature reads as
+"almost on it but not quite" even when geometrically correct, because the eye
+cannot judge a 2-px line against a 50-px-wide path. Trace the visible footprint
+as a polygon instead.
+
+**Directional / axial intent (gaze, trajectory, approach line, sightline)**
+wants the polyline encoding `[6, x1, y1, x2, y2]` with an arrow-phrase label
+(`fly→flower approach axis`, `looking toward X`). An axis-aligned rectangle
+across the same line reads as a bounded region, not a direction.
+
 **Note on user-drawn regions:** Browser-drawn regions occasionally arrive without
 a shape-ID prefix if the browser saved an in-progress draw state — the first element
 will be a large float rather than an integer 1–7. Treat these as polylines (shape 6).
@@ -202,6 +221,34 @@ are always strings. Empty annotation: `av: {}`.
 > gets remapped to numeric IDs. **Unknown keys are now rejected** (they used to
 > be silently stored, which dropped labels from the canvas). If you see
 > `Unknown av key(s)`, call `via_get_project` to see the current schema.
+
+### Attribute conventions
+
+**`label` names the thing. `description` cites the visible evidence** for the
+label — colour, shape, scale, texture, position — so the annotation is a
+falsifiable claim, not a free-text guess. Compare:
+
+- Weak: `label="compound eye"`, `description="red eye"`
+- Strong: `label="compound eye"`, `description="deep red-brown holoptic eye with visible pseudopupil and fine pale setae on the surface"`
+
+The strong form lets the next reader (or the user) check the claim against the
+pixels; the weak form is just a re-statement of the label.
+
+**For labels that imply a measurable property** (grain size, age class,
+magnitude, count, distance, height), ground the term in the visible scale of
+the feature, not the lexical association. Example: pebble (4–64 mm) vs cobble
+(64–256 mm) vs boulder (>256 mm) are real Wentworth distinctions — don't
+reach for "pebble" just because the rocks are rounded and in a streambed.
+Same family: "small mammal" without a length cue, "tall tree" without a
+scale reference, "magnitude 5 quake" with no felt-intensity evidence.
+
+**Describe what's visible, not what it might be called.** For terms imported
+from training data (architectural names, species, archaeological labels,
+geological formations), describe the visible structure first and supply the
+canonical name only if the image itself disambiguates. Resisting "Court of
+Three Stupas" in favour of "upper terrace ruins (north annex)" is a feature,
+not a hedge — the visible description is verifiable; the canonical name needs
+a site plan to confirm.
 
 ### Attribute object shape (for via_update_project bulk edits)
 
@@ -288,6 +335,13 @@ def polyline_to_band(points, half_width):
 Errors that have shown up repeatedly across sessions and survived the overlay
 check. Each one costs a user-correction round if you don't watch for it.
 
+**Extend the box to the visible extremity, not the bulk.** When boxing a
+shape with a thin, curved, or projecting part — a tail, an abdomen tip, an
+ear, a wing tip, the south wing of an L-shaped roof — the reflexive failure
+is to box the *bulk* of the feature and clip the *extremity*. Before
+declaring a placement done, identify the lowest/rightmost/etc. pixel that
+semantically belongs to the named feature and check the box edge reaches it.
+
 **Reflections are separate regions.** On still water, glass, polished floors,
 or any mirror surface, the reflection is its own visual region — not part of
 the object it reflects. A box for "tree" must not extend into the inverted
@@ -325,6 +379,16 @@ density, not the heavily-downscaled view.
 
 **"Add a bounding box for X at coordinates..."**
 → `via_get_image(fid)` first, then `via_add_region` with `xy: [2, x, y, w, h]`
+
+**"Annotate a direction / line of sight / trajectory / approach axis"**
+→ polyline `via_add_region` with `xy: [6, x1, y1, x2, y2]` and an
+arrow-phrase label (`"fly→flower approach axis"`, `"gaze toward X"`).
+Rectangles read as bounded regions, not directions.
+
+**"Annotate a path / road / stair flight / stream"**
+→ polygon `via_add_region` with `xy: [7, x1, y1, x2, y2, ...]` tracing the
+visible footprint. Polylines along the centreline of a wide irregular
+feature look misaligned in the overlay even when the geometry is fine.
 
 **"Review my annotations for consistency"**
 → `via_get_image(fid)` + `via_get_annotations`, then reason over both
