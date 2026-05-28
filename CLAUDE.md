@@ -13,9 +13,9 @@ Sister project to [jscad-mcp](https://github.com/caliperhq/jscad-mcp).
 
 ## Layout
 
-- `src/via_mcp/store.py` — `ProjectStore`: in-memory + disk-persisted annotation state
-- `src/via_mcp/http_handler.py` — `VIAHandler` + `make_handler()`: VIA REST protocol
-- `src/via_mcp/server.py` — tool handler functions + `main()` entry point
+- `src/annotate/store.py` — `ProjectStore`: in-memory + disk-persisted annotation state
+- `src/annotate/http_handler.py` — `VIAHandler` + `make_handler()`: VIA REST protocol
+- `src/annotate/server.py` — tool handler functions + `main()` entry point
 - `scripts/build_html.py` — patches VIA HTML from submodule before release
 - `skills/via-annotator/SKILL.md` — Claude Code skill for the annotation workflow
 
@@ -52,6 +52,6 @@ cp skills/via-annotator/SKILL.md ~/.claude/skills/via-annotator/SKILL.md
 
 ## VIA HTML token
 
-`src/via_mcp/via_image_annotator.html` is gitignored (generated). It contains
+`src/annotate/via_image_annotator.html` is gitignored (generated). It contains
 `__VIA_MCP_PORT__` as a literal token; `main()` substitutes the real port at startup
 before serving. Run `scripts/build_html.py` after `git submodule update` to regenerate it.

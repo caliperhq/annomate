@@ -4,8 +4,8 @@ import json
 import pytest
 import mcp.types as types
 
-from via_mcp.store import ProjectStore
-from via_mcp.server import (
+from annotate.store import ProjectStore
+from annotate.server import (
     handle_get_project,
     handle_list_files,
     handle_get_annotations,
@@ -313,7 +313,7 @@ def test_add_file_resolves_basename_conflict(store, tmp_path):
 # --- default attribute schema ---
 
 def test_new_project_has_default_attributes(store, tmp_path):
-    from via_mcp.server import _minimal_project
+    from annotate.server import _minimal_project
     p = _minimal_project()
     assert "1" in p["attribute"]
     assert p["attribute"]["1"]["aname"] == "label"

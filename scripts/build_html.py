@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Patch VIA image annotator HTML from the submodule and copy to src/via_mcp/.
+Patch VIA image annotator HTML from the submodule and copy to src/annotate/.
 
 Run before building a release:
     python scripts/build_html.py
@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 VIA_HTML_SRC = ROOT / "via" / "via-3.x.y" / "dist" / "via_image_annotator.html"
-VIA_HTML_DST = ROOT / "src" / "via_mcp" / "via_image_annotator.html"
+VIA_HTML_DST = ROOT / "src" / "annotate" / "via_image_annotator.html"
 
 # If VIA bumps its major version directory (e.g. via-4.x.y), update this:
 VIA_VERSION_DIR = "via-3.x.y"

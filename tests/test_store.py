@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from via_mcp.store import ProjectStore, ProjectNotFoundError, ProjectConflictError
+from annotate.store import ProjectStore, ProjectNotFoundError, ProjectConflictError
 
 
 def _minimal_project(pid="__VIA_PROJECT_ID__", rev="__VIA_PROJECT_REV_ID__"):

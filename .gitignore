@@ -9,7 +9,7 @@ venv/
 .venv/
 
 # Generated — rebuild with scripts/build_html.py
-src/via_mcp/via_image_annotator.html
+src/annotate/via_image_annotator.html
 
 # Runtime state
 *.json
@@ -25,3 +25,4 @@ src/via_mcp/via_image_annotator.html
 
 .jscad-cache/
 docs/superpowers/
+.playwright-mcp/

@@ -23,7 +23,7 @@ import mcp.server.stdio
 import mcp.types as types
 import platformdirs
 
-from via_mcp.store import ProjectStore
+from annotate.store import ProjectStore
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +348,12 @@ def main():
         ) / "project_state.json"
 
     html_template = (
-        files("via_mcp").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
+        files("annotate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
     )
 
     store = ProjectStore(state_file=state_file)
 
-    from via_mcp.http_handler import make_handler
+    from annotate.http_handler import make_handler
     # Bind with port 0 so the OS assigns a free port, then patch html_content
     # with the actual port before the first request is served.
     # Rebuild image registry from persisted project (survives server restart)

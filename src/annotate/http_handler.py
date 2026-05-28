@@ -4,7 +4,7 @@ import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from via_mcp.store import ProjectNotFoundError, ProjectConflictError, ProjectStore
+from annotate.store import ProjectNotFoundError, ProjectConflictError, ProjectStore
 
 
 class VIAHandler(BaseHTTPRequestHandler):
