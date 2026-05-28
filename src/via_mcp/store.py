@@ -97,5 +97,19 @@ class ProjectStore:
                 self._project = json.loads(
                     self._state_file.read_text(encoding="utf-8")
                 )
+                self._migrate()
             except Exception:
                 self._project = None
+
+    def _migrate(self) -> None:
+        """Patch persisted projects that predate required VIA fields."""
+        p = self._project
+        if p is None:
+            return
+        proj = p.setdefault("project", {})
+        if "vid_list" not in proj:
+            proj["vid_list"] = list(p.get("view", {}).keys())
+        proj.setdefault("data_format_version", "3.1.1")
+        p.setdefault("config", {}).setdefault("file", {}).setdefault(
+            "loc_prefix", {"1": "", "2": "", "3": "", "4": ""}
+        )
