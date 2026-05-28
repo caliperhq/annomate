@@ -14,6 +14,8 @@ from via_mcp.server import (
     handle_delete_region,
     handle_update_project,
     handle_add_file,
+    handle_get_image,
+    handle_save_project,
 )
 
 
@@ -306,3 +308,92 @@ def test_add_file_resolves_basename_conflict(store, tmp_path):
     assert len(registry) == 2
     assert "photo.jpg" in registry
     assert "photo_2.jpg" in registry
+
+
+# --- default attribute schema ---
+
+def test_new_project_has_default_attributes(store, tmp_path):
+    from via_mcp.server import _minimal_project
+    p = _minimal_project()
+    assert "1" in p["attribute"]
+    assert p["attribute"]["1"]["aname"] == "label"
+    assert "2" in p["attribute"]
+    assert p["attribute"]["2"]["aname"] == "description"
+    assert p["config"]["ui"]["spatial_region_label_attribute_id"] == "1"
+
+
+def test_add_file_creates_project_with_default_attributes(store, tmp_path):
+    img = tmp_path / "cat.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+    handle_add_file(store, {}, 9669, str(img))
+    project = store.get()
+    assert "1" in project["attribute"]
+    assert project["attribute"]["1"]["aname"] == "label"
+
+
+# --- via_get_image ---
+
+@pytest.fixture
+def store_with_image(store, tmp_path):
+    from PIL import Image as PILImage
+    img_path = tmp_path / "test.jpg"
+    PILImage.new("RGB", (200, 100), color=(255, 0, 0)).save(img_path, "JPEG")
+    registry = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    return store, registry, img_path
+
+
+def test_get_image_no_project(store):
+    result = handle_get_image(store, {}, fid="1")
+    assert "No project" in _text(result)
+
+
+def test_get_image_unknown_fid(loaded_store):
+    result = handle_get_image(loaded_store, {}, fid="99")
+    assert "not found" in _text(result).lower()
+
+
+def test_get_image_returns_image_content(store_with_image):
+    import mcp.types as types
+    store, registry, img_path = store_with_image
+    result = handle_get_image(store, registry, fid="1")
+    assert len(result) == 2
+    assert isinstance(result[0], types.TextContent)
+    assert "200×100" in result[0].text
+    assert isinstance(result[1], types.ImageContent)
+    assert result[1].mimeType == "image/jpeg"
+    assert len(result[1].data) > 0
+
+
+def test_get_image_downscales(store_with_image):
+    store, registry, img_path = store_with_image
+    result = handle_get_image(store, registry, fid="1", max_dim=50)
+    assert "200×100" in result[0].text   # original dims always reported
+    assert "returned=50×25" in result[0].text
+
+
+def test_get_image_no_downscale_when_small(store_with_image):
+    store, registry, img_path = store_with_image
+    result = handle_get_image(store, registry, fid="1", max_dim=1024)
+    assert "returned=" not in result[0].text   # image fits, no resize note
+
+
+# --- via_save_project ---
+
+def test_save_project_no_project(store, tmp_path):
+    result = handle_save_project(store, str(tmp_path / "out.json"))
+    assert "No project" in _text(result)
+
+
+def test_save_project_bad_dir(loaded_store, tmp_path):
+    result = handle_save_project(loaded_store, "/nonexistent/dir/out.json")
+    assert "not found" in _text(result).lower()
+
+
+def test_save_project_writes_json(loaded_store, tmp_path):
+    out = tmp_path / "out.json"
+    result = handle_save_project(loaded_store, str(out))
+    assert "Saved" in _text(result)
+    data = json.loads(out.read_text())
+    assert "metadata" in data
+    assert "file" in data

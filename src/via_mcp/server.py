@@ -4,7 +4,10 @@ via-mcp server — HTTP (VIA push/pull) + MCP stdio in one process.
 
 import argparse
 import asyncio
+import base64
+import io
 import json
+import mimetypes
 import os
 import random
 import string
@@ -64,11 +67,31 @@ def _minimal_project() -> dict:
                 "file_metadata_editor_visible": True,
                 "spatial_metadata_editor_visible": True,
                 "temporal_segment_metadata_editor_visible": True,
-                "spatial_region_label_attribute_id": "",
+                "spatial_region_label_attribute_id": "1",
                 "gtimeline_visible_row_count": "4",
             },
         },
-        "attribute": {},
+        # Default schema: label (on-canvas) + description (longer notes).
+        # anchor_id "FILE1_Z0_XY1" = spatial region on an image file.
+        # type 1 = TEXT. VIA renders attribute "1" as the on-canvas label.
+        "attribute": {
+            "1": {
+                "aname": "label",
+                "anchor_id": "FILE1_Z0_XY1",
+                "type": 1,
+                "desc": "Short region label shown on the canvas",
+                "options": {},
+                "default_option_id": "",
+            },
+            "2": {
+                "aname": "description",
+                "anchor_id": "FILE1_Z0_XY1",
+                "type": 1,
+                "desc": "Longer annotation notes",
+                "options": {},
+                "default_option_id": "",
+            },
+        },
         "file": {},
         "view": {},
         "metadata": {},
@@ -230,6 +253,65 @@ def handle_update_project(
         return _text(f"Missing required keys: {sorted(missing)}")
     store.set_project(project)
     return _text("Project updated.")
+
+
+def handle_get_image(
+    store: ProjectStore,
+    image_registry: dict,
+    fid: str,
+    max_dim: int = 1024,
+) -> list:
+    from PIL import Image as PILImage
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID '{fid}' not found. Use via_list_files to see available files.")
+    abs_path = file_entry.get("abs_path") or image_registry.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return _text(f"Image path not available for fid={fid} (file may have been loaded via browser, not via_add_file).")
+    from pathlib import Path as _Path
+    p = _Path(abs_path)
+    if not p.exists():
+        return _text(f"Image file not found at {abs_path}")
+    with PILImage.open(p) as img:
+        orig_w, orig_h = img.size
+        orig_fmt = img.format or "JPEG"
+        display_w, display_h = orig_w, orig_h
+        if max_dim and max(orig_w, orig_h) > max_dim:
+            scale = max_dim / max(orig_w, orig_h)
+            display_w = round(orig_w * scale)
+            display_h = round(orig_h * scale)
+            img = img.resize((display_w, display_h), PILImage.LANCZOS)
+        if orig_fmt == "JPEG" and img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format=orig_fmt)
+        data = base64.b64encode(buf.getvalue()).decode()
+    mime = mimetypes.guess_type(str(p))[0] or "image/jpeg"
+    header = (
+        f"Image fid={fid} fname={file_entry.get('fname')} "
+        f"original={orig_w}×{orig_h}px"
+        + (f" returned={display_w}×{display_h}px" if (display_w, display_h) != (orig_w, orig_h) else "")
+        + ". Coordinates you provide must be in original pixel space."
+    )
+    return [
+        types.TextContent(type="text", text=header),
+        types.ImageContent(type="image", data=data, mimeType=mime),
+    ]
+
+
+def handle_save_project(store: ProjectStore, path: str) -> list[types.TextContent]:
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    from pathlib import Path as _Path
+    p = _Path(path)
+    if not p.parent.exists():
+        return _text(f"Directory not found: {p.parent}")
+    p.write_text(json.dumps(project, indent=2), encoding="utf-8")
+    return _text(f"Saved to {p}")
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +499,34 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     "required": ["project_json"],
                 },
             ),
+            types.Tool(
+                name="via_get_image",
+                description=(
+                    "Return the image so you can see what you are annotating. "
+                    "Always call this before adding regions — you need to see the image to place accurate coordinates. "
+                    "Returns the original pixel dimensions (use these for all coordinates) plus the image, "
+                    "downscaled to max_dim on the longest edge for context efficiency."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string", "description": "File ID from via_list_files or via_add_file"},
+                        "max_dim": {"type": "integer", "description": "Limit longest edge to this many pixels for context efficiency (default 1024)", "default": 1024},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
+                name="via_save_project",
+                description="Write the current project JSON to a file on disk. Use when the user asks to save or export their work.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to write, e.g. /home/user/project.json"},
+                    },
+                    "required": ["path"],
+                },
+            ),
         ]
 
     @mcp_server.call_tool()
@@ -453,6 +563,14 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_delete_region(store, metadata_id=arguments["metadata_id"])
             if name == "via_update_project":
                 return handle_update_project(store, project_json=arguments["project_json"])
+            if name == "via_get_image":
+                return handle_get_image(
+                    store, image_registry,
+                    fid=arguments["fid"],
+                    max_dim=int(arguments.get("max_dim", 1024)),
+                )
+            if name == "via_save_project":
+                return handle_save_project(store, path=arguments["path"])
             return _text(f"Unknown tool: {name}")
         except KeyError as e:
             return _text(f"Missing required argument: {e}")

@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 keywords = ["via", "vgg", "annotation", "mcp", "model-context-protocol", "claude", "image-annotation"]
 dependencies = [
     "mcp>=1.27,<2.0",
+    "pillow>=10.0",
     "platformdirs>=4.0",
 ]
 
