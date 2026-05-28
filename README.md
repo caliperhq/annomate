@@ -62,7 +62,7 @@ Install the companion Claude Code skill so Claude knows the annotation
 workflow and JSON format automatically:
 
 ```bash
-cp -r skills/via-annotator ~/.claude/skills/
+cp -r skills/annotate ~/.claude/skills/
 ```
 
 See [skills/README.md](skills/README.md) for details.

@@ -17,7 +17,7 @@ Sister project to [jscad-mcp](https://github.com/caliperhq/jscad-mcp).
 - `src/annotate/http_handler.py` — `VIAHandler` + `make_handler()`: VIA REST protocol
 - `src/annotate/server.py` — tool handler functions + `main()` entry point
 - `scripts/build_html.py` — patches VIA HTML from submodule before release
-- `skills/via-annotator/SKILL.md` — Claude Code skill for the annotation workflow
+- `skills/annotate/SKILL.md` — Claude Code skill for the annotation workflow
 
 ## Build (release)
 
@@ -43,11 +43,11 @@ Tests use `pytest`. No mocks — `test_http.py` spins up a real `HTTPServer` on 
 
 ## Skills
 
-`skills/via-annotator/SKILL.md` is the source of truth. After editing it, copy to the
+`skills/annotate/SKILL.md` is the source of truth. After editing it, copy to the
 user-level install so Claude Code picks it up immediately:
 
 ```bash
-cp skills/via-annotator/SKILL.md ~/.claude/skills/via-annotator/SKILL.md
+cp skills/annotate/SKILL.md ~/.claude/skills/annotate/SKILL.md
 ```
 
 ## VIA HTML token
