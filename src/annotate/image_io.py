@@ -36,6 +36,7 @@ import platformdirs
 class LoaderClass(Enum):
     PIL_NATIVE  = "pil_native"
     PILLOW_HEIF = "pillow_heif"
+    PDF         = "pdf"
     UNKNOWN     = "unknown"
 
 
@@ -53,11 +54,22 @@ BROWSER_NATIVE = frozenset({
 })
 
 _HEIF_EXTS = frozenset({".heic", ".heif", ".avif"})
+_PDF_EXTS = frozenset({".pdf"})
 
 
 def heif_available() -> bool:
     try:
         importlib.import_module("pillow_heif")
+        return True
+    except ImportError:
+        return False
+
+
+def pdf_available() -> bool:
+    """True iff pdf2image is importable. Doesn't guarantee the poppler
+    CLI is on PATH — call pdf_page_count() to find out for real."""
+    try:
+        importlib.import_module("pdf2image")
         return True
     except ImportError:
         return False
@@ -90,6 +102,8 @@ def detect(path: Path | str) -> LoaderClass:
         return LoaderClass.PIL_NATIVE
     if ext in _HEIF_EXTS:
         return LoaderClass.PILLOW_HEIF if heif_available() else LoaderClass.UNKNOWN
+    if ext in _PDF_EXTS:
+        return LoaderClass.PDF if pdf_available() else LoaderClass.UNKNOWN
     return LoaderClass.UNKNOWN
 
 
@@ -153,18 +167,45 @@ def cached_browser_path(abs_path: Path | str, *, page: int = 0) -> Path:
     return target
 
 
-def open_as_pil(abs_path: Path | str, *, page: int = 0):
-    """Open any supported format and return a PIL.Image.Image."""
+def open_as_pil(abs_path: Path | str, *, page: int = 0, dpi: int = 200):
+    """Open any supported format and return a PIL.Image.Image.
+
+    ``page`` is only meaningful for PDFs (and future multi-page formats);
+    for single-image formats it's ignored. ``dpi`` controls the PDF
+    rasterisation density (200 = readable text + manageable file size).
+    """
     from PIL import Image as PILImage
     abs_path = Path(abs_path)
     klass = detect(abs_path)
     if klass is LoaderClass.UNKNOWN:
         raise LookupError(f"Unsupported image format for {abs_path}")
+
+    if klass is LoaderClass.PDF:
+        from pdf2image import convert_from_path
+        # pdf2image uses 1-based page numbers; we expose 0-based.
+        first = last = page + 1
+        pages = convert_from_path(
+            str(abs_path), dpi=dpi, first_page=first, last_page=last,
+        )
+        if not pages:
+            raise LookupError(f"PDF page {page} not found in {abs_path}")
+        img = pages[0]
+        img.load()
+        return img
+
     # pillow-heif registers itself as a PIL opener at module import, so
     # PIL.Image.open handles HEIC natively from here.
     img = PILImage.open(abs_path)
     img.load()  # decode now so EXIF etc. is populated
     return img
+
+
+def pdf_page_count(abs_path: Path | str) -> int:
+    """Return the number of pages in a PDF. Requires the ``[io]`` extra
+    and the poppler-utils CLI."""
+    from pdf2image.pdf2image import pdfinfo_from_path
+    info = pdfinfo_from_path(str(abs_path))
+    return int(info.get("Pages", 0))
 
 
 # ---------------------------------------------------------------------------

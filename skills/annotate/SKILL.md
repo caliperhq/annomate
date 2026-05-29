@@ -88,6 +88,7 @@ For the recurring failure modes that even a careful loop misses, read
 | Bulk / wholesale changes | `via_update_project` |
 | Save project JSON to disk | `via_save_project` |
 | Read EXIF / GPS / camera metadata | `via_read_metadata` |
+| Load a PDF as one file per page | `via_load_document` |
 
 ### Local-model assistance (optional; needs `pip install 'annotate[ai]'`)
 
@@ -140,14 +141,22 @@ schema already installed.
 
 **Format support.** Pillow-native formats (jpg, png, gif, webp, bmp,
 tiff) work out of the box. HEIC / HEIF / AVIF (default iPhone-camera
-format) need the `[io]` extra: `pip install 'annotate[io]'`.
-Non-browser-native formats (HEIC, BMP, TIFF) are converted once to
+format) and PDF need the `[io]` extra: `pip install 'annotate[io]'`
+(PDF also needs `poppler-utils` on the system path). Non-browser-
+native formats (HEIC, BMP, TIFF, PDF pages) are converted once to
 JPEG and cached at `~/.cache/annotate/converted/` for browser
 display — the cache invalidates automatically when the source file's
 mtime changes. The original file path stays authoritative in the
-project; AI tools operate on the original. Other formats (RAW, PDF,
-video, GeoTIFF, DICOM, PSD, gigapixel TIFF) are designed but not yet
-implemented — see `docs/design/2026-05-28-format-conversion-and-tooling.md`.
+project; AI tools operate on the original.
+
+For **PDFs**, use `via_load_document(path, pages="all")` — it loads
+one file entry per page (with `source_pdf` + `source_pdf_page`
+fields). For everything else, `via_add_file(path)` handles format
+detection automatically.
+
+Other formats (RAW, video, GeoTIFF, DICOM, PSD, gigapixel TIFF) are
+designed but not yet implemented — see
+`docs/design/2026-05-28-format-conversion-and-tooling.md`.
 
 ## Viewing images
 

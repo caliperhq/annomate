@@ -35,7 +35,6 @@ from annotate.image_io import (
     ("cat.tif",  LoaderClass.PIL_NATIVE),
     ("cat.tiff", LoaderClass.PIL_NATIVE),
     ("cat.cr2",  LoaderClass.UNKNOWN),
-    ("cat.pdf",  LoaderClass.UNKNOWN),
     ("cat.mp4",  LoaderClass.UNKNOWN),
 ])
 def test_detect_extension_buckets(name, expected):
@@ -190,3 +189,128 @@ def test_handle_read_metadata_returns_dims(tmp_path):
     assert data["fname"] == "x.jpg"
     assert data["dims"] == [300, 200]
     assert data["source"] in ("exiftool", "pillow")
+
+
+# --- PDF support (skips when pdf2image / poppler not installed) ---
+
+def _write_multipage_pdf(path: Path, page_count: int) -> Path:
+    """Use Pillow's PDF writer to build a fixture without an extra dep."""
+    from PIL import Image as PILImage
+    pages = [
+        PILImage.new("RGB", (300, 200), color=(i * 30 % 256, 80, 80))
+        for i in range(page_count)
+    ]
+    pages[0].save(path, "PDF", save_all=True, append_images=pages[1:])
+    return path
+
+
+def _poppler_available() -> bool:
+    """Check if poppler-utils' pdftoppm is on PATH."""
+    import shutil
+    return shutil.which("pdftoppm") is not None
+
+
+_NEEDS_PDF = pytest.mark.skipif(
+    not (image_io.pdf_available() and _poppler_available()),
+    reason="pdf2image and/or poppler-utils not installed",
+)
+
+
+def test_detect_pdf_depends_on_pdf2image_availability(tmp_path):
+    """Whether pdf2image is installed flips detect() between PDF and UNKNOWN."""
+    p = tmp_path / "doc.pdf"
+    p.write_bytes(b"%PDF-1.4\n...")
+    expected = LoaderClass.PDF if image_io.pdf_available() else LoaderClass.UNKNOWN
+    assert detect(p) == expected
+
+
+@_NEEDS_PDF
+def test_pdf_page_count(tmp_path):
+    p = _write_multipage_pdf(tmp_path / "three.pdf", 3)
+    assert image_io.pdf_page_count(p) == 3
+
+
+@_NEEDS_PDF
+def test_cached_browser_path_pdf_caches_per_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
+    p = _write_multipage_pdf(tmp_path / "two.pdf", 2)
+    p0 = image_io.cached_browser_path(p, page=0)
+    p1 = image_io.cached_browser_path(p, page=1)
+    assert p0 != p1
+    assert p0.exists() and p1.exists()
+    # And same call returns same cached file (no re-render)
+    p0_again = image_io.cached_browser_path(p, page=0)
+    assert p0_again == p0
+    assert p0.stat().st_mtime_ns == p0_again.stat().st_mtime_ns
+
+
+@_NEEDS_PDF
+def test_handle_load_document_all_pages(tmp_path, monkeypatch):
+    import json as _json
+    from annotate.store import ProjectStore
+    from annotate.server import handle_load_document
+    monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
+
+    pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 4)
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    result = handle_load_document(store, registry, 9669, str(pdf_path), "all")
+    data = _json.loads(result[0].text)
+    assert len(data["fids"]) == 4
+    assert data["page_count"] == 4
+    assert data["pages_loaded"] == [1, 2, 3, 4]
+
+    # Verify each file entry carries the source PDF link
+    project = store.get()
+    for fid in data["fids"]:
+        entry = project["file"][fid]
+        assert entry["source_pdf"] == str(pdf_path)
+        assert "source_pdf_page" in entry
+        assert entry["abs_path"].endswith(".jpg")
+
+
+@_NEEDS_PDF
+def test_handle_load_document_specific_pages(tmp_path, monkeypatch):
+    import json as _json
+    from annotate.store import ProjectStore
+    from annotate.server import handle_load_document
+    monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
+
+    pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 5)
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    result = handle_load_document(store, registry, 9669, str(pdf_path),
+                                   pages=[0, 2, 4])
+    data = _json.loads(result[0].text)
+    assert len(data["fids"]) == 3
+    assert data["pages_loaded"] == [1, 3, 5]
+
+
+@_NEEDS_PDF
+def test_handle_load_document_filters_out_of_range_pages(tmp_path, monkeypatch):
+    import json as _json
+    from annotate.store import ProjectStore
+    from annotate.server import handle_load_document
+    monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
+
+    pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 2)
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    # Asks for pages 0 (valid), 5 (out of range), and 1 (valid)
+    result = handle_load_document(store, registry, 9669, str(pdf_path),
+                                   pages=[0, 5, 1])
+    data = _json.loads(result[0].text)
+    assert data["pages_loaded"] == [1, 2]
+
+
+def test_handle_load_document_rejects_non_pdf(tmp_path):
+    from annotate.store import ProjectStore
+    from annotate.server import handle_load_document
+    from PIL import Image as PILImage
+
+    img_path = tmp_path / "not_a_pdf.jpg"
+    PILImage.new("RGB", (50, 50)).save(img_path, "JPEG")
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    result = handle_load_document(store, registry, 9669, str(img_path), "all")
+    assert "PDF" in result[0].text

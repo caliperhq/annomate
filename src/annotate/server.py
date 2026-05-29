@@ -722,6 +722,101 @@ def handle_save_project(store: ProjectStore, path: str) -> list[types.TextConten
 # IO layer — metadata reader
 # ---------------------------------------------------------------------------
 
+def handle_load_document(
+    store: ProjectStore,
+    image_registry: dict,
+    port: int,
+    path: str,
+    pages,
+) -> list[types.TextContent]:
+    """Load a multi-page document (PDF, etc.) as one file entry per page.
+
+    Each page is rasterised to a JPEG via image_io's cache, then
+    registered exactly like a normal image. File entries gain
+    ``source_pdf`` + ``source_pdf_page`` fields for traceability;
+    these survive push/pull (VIA ignores unknown keys).
+    """
+    from annotate import image_io
+    abs_path = Path(path).resolve()
+    if not abs_path.exists():
+        return _text(f"File not found: {abs_path}")
+    klass = image_io.detect(abs_path)
+    if klass is not image_io.LoaderClass.PDF:
+        return _text(
+            f"via_load_document currently supports PDF only; got {abs_path.suffix!r}."
+        )
+    if not image_io.pdf_available():
+        return _text("PDF support needs the [io] extra: pip install 'annotate[io]'")
+
+    try:
+        page_count = image_io.pdf_page_count(abs_path)
+    except Exception as e:
+        return _text(
+            f"Failed to read PDF page count ({e}). "
+            f"poppler-utils may not be installed (apt: poppler-utils; brew: poppler)."
+        )
+
+    # Normalise the pages argument to a sorted 0-based index list.
+    if pages == "all" or pages is None:
+        page_indices = list(range(page_count))
+    elif isinstance(pages, int):
+        page_indices = [pages]
+    elif isinstance(pages, list):
+        page_indices = sorted({int(p) for p in pages})
+    else:
+        return _text("pages must be 'all', an int, or a list of ints")
+
+    page_indices = [p for p in page_indices if 0 <= p < page_count]
+    if not page_indices:
+        return _text(f"No valid pages requested (PDF has {page_count}).")
+
+    project = store.get()
+    if project is None:
+        project = _minimal_project()
+
+    fids: list[str] = []
+    converted_paths: list[str] = []
+    for page_idx in page_indices:
+        try:
+            jpeg_path = image_io.cached_browser_path(abs_path, page=page_idx)
+        except Exception as e:
+            return _text(f"Failed to convert page {page_idx + 1}: {e}")
+
+        # Synthetic filename per page, conflict-resolved against the registry.
+        stem = abs_path.stem
+        fname = f"{stem}_p{page_idx + 1:03d}.jpg"
+        if fname in image_registry and image_registry[fname] != str(jpeg_path):
+            counter = 2
+            while f"{stem}_p{page_idx + 1:03d}_{counter}.jpg" in image_registry:
+                counter += 1
+            fname = f"{stem}_p{page_idx + 1:03d}_{counter}.jpg"
+
+        image_registry[fname] = str(jpeg_path)
+        src = f"http://localhost:{port}/img/{fname}"
+        fid = _next_id(project["file"])
+        vid = _next_id(project["view"])
+        project["file"][str(fid)] = {
+            "fid": fid, "fname": fname, "type": 2, "loc": 2, "src": src,
+            "abs_path": str(jpeg_path),
+            "source_pdf": str(abs_path),
+            "source_pdf_page": page_idx,
+        }
+        project["view"][str(vid)] = {"fid_list": [fid]}
+        project["project"].setdefault("vid_list", []).append(str(vid))
+        fids.append(str(fid))
+        converted_paths.append(str(jpeg_path))
+
+    store.set_project(project)
+    return _text(json.dumps({
+        "fids": fids,
+        "loader": "pdf2image",
+        "source_pdf": str(abs_path),
+        "page_count": page_count,
+        "pages_loaded": [p + 1 for p in page_indices],   # 1-based for humans
+        "cached_at": converted_paths,
+    }, indent=2))
+
+
 def handle_read_metadata(
     store: ProjectStore,
     image_registry_map: dict,
@@ -1889,6 +1984,35 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_load_document",
+                description=(
+                    "Load a multi-page document (PDF) as one file entry "
+                    "per page. Each page is rasterised once to JPEG and "
+                    "cached; subsequent loads reuse the cache. File "
+                    "entries carry source_pdf + source_pdf_page fields "
+                    "for traceability. pages='all' (default), a single "
+                    "int (0-based), or a list of ints to load specific "
+                    "pages. Requires the [io] extra and poppler-utils "
+                    "on PATH."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to the PDF"},
+                        "pages": {
+                            "oneOf": [
+                                {"type": "string", "enum": ["all"]},
+                                {"type": "integer"},
+                                {"type": "array", "items": {"type": "integer"}},
+                            ],
+                            "default": "all",
+                            "description": "0-based page indices to load",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
                 name="via_read_metadata",
                 description=(
                     "Read EXIF / XMP / IPTC metadata from an image: capture "
@@ -2171,6 +2295,12 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_save_project":
                 return handle_save_project(store, path=arguments["path"])
+            if name == "via_load_document":
+                return handle_load_document(
+                    store, image_registry, port,
+                    path=arguments["path"],
+                    pages=arguments.get("pages", "all"),
+                )
             if name == "via_read_metadata":
                 return handle_read_metadata(store, image_registry, fid=arguments["fid"])
             if name == "via_model_status":

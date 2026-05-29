@@ -44,6 +44,12 @@ exposure, orientation, dims. Run at session start on each new file
 to ground priors — a capture timestamp + GPS catches a whole class
 of lighting / season / location prior failures.
 
+**"Load this PDF for annotation" / "Annotate page 3 of this report"**
+→ `via_load_document("/path/to/doc.pdf", pages="all")` for everything,
+or `pages=[2]` for just page 3 (0-based). Each page becomes its own
+file entry that the rest of the tools treat as a normal image.
+Requires the `[io]` extra and `poppler-utils` on PATH.
+
 ## Verification + diff
 
 **"That box looks off — let me check"**
