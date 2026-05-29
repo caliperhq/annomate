@@ -94,9 +94,44 @@ class Florence2Adapter(Adapter):
             return "cpu"
         return requested
 
+    def _patch_florence2_config_compat(self) -> None:
+        """Patch Florence2LanguageConfig for transformers ≥ 5.x compatibility.
+
+        Florence-2's Florence2LanguageConfig.__init__ accesses
+        self.forced_bos_token_id after calling super().__init__(), but
+        transformers 5.x PretrainedConfig no longer pre-populates that
+        attribute. We load the dynamic config class and inject
+        forced_bos_token_id=None into kwargs so PretrainedConfig stores
+        it as an instance attribute via its **kwargs → setattr path.
+
+        Idempotent — guarded by _annotate_f2_compat flag on the class.
+        """
+        try:
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
+            cls = get_class_from_dynamic_module(
+                "configuration_florence2.Florence2LanguageConfig",
+                self.model_id,
+                trust_remote_code=True,
+            )
+        except Exception:
+            return
+
+        if getattr(cls, "_annotate_f2_compat", False):
+            return
+
+        orig_init = cls.__init__
+
+        def _compat_init(cfg_self, *args, **kwargs):
+            kwargs.setdefault("forced_bos_token_id", None)
+            orig_init(cfg_self, *args, **kwargs)
+
+        cls.__init__ = _compat_init
+        cls._annotate_f2_compat = True
+
     def load(self) -> None:
         if self._loaded:
             return
+        self._patch_florence2_config_compat()
         import torch
         from transformers import AutoModelForCausalLM, AutoProcessor
 

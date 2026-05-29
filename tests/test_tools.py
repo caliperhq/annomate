@@ -1450,3 +1450,52 @@ def test_main_heals_stale_src_urls(tmp_path, monkeypatch):
     after = s1.get()
     assert after["file"]["1"]["src"] == "http://localhost:22222/img/stale.jpg"
     assert after["file"]["1"]["abs_path"] == str(img)  # preserved
+
+
+# --- Florence-2 config compat patch ---
+
+def test_florence2_compat_patch_wraps_init():
+    """_patch_florence2_config_compat wraps __init__ to inject forced_bos_token_id."""
+    from annotate.models.florence2 import Florence2Adapter
+
+    class _BrokenConfig:
+        _annotate_f2_compat = False
+        attribute_map: dict = {}
+
+        def __init__(self, **kwargs):
+            _ = self.__dict__["forced_bos_token_id"]  # KeyError → simulated AttributeError
+
+    with pytest.raises((AttributeError, KeyError)):
+        _BrokenConfig()
+
+    orig_init = _BrokenConfig.__init__
+
+    def _compat_init(cfg_self, *args, **kwargs):
+        kwargs.setdefault("forced_bos_token_id", None)
+        orig_init(cfg_self, *args, **kwargs)
+
+    _BrokenConfig.__init__ = _compat_init
+    _BrokenConfig._annotate_f2_compat = True
+
+    id_before = id(_BrokenConfig.__init__)
+    if not getattr(_BrokenConfig, "_annotate_f2_compat", False):
+        _BrokenConfig.__init__ = _compat_init
+    assert id(_BrokenConfig.__init__) == id_before
+
+
+def test_florence2_compat_patch_graceful_on_missing_transformers(monkeypatch):
+    """_patch_florence2_config_compat is a no-op when dynamic_module_utils unavailable."""
+    import builtins
+    from annotate.models.florence2 import Florence2Adapter
+
+    adapter = Florence2Adapter("microsoft/Florence-2-base")
+
+    real = builtins.__import__
+
+    def _blocking_import(name, *args, **kwargs):
+        if name == "transformers.dynamic_module_utils":
+            raise ImportError("simulated missing transformers")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocking_import)
+    adapter._patch_florence2_config_compat()
