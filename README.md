@@ -1,5 +1,10 @@
 # annomate
 
+[![PyPI](https://img.shields.io/pypi/v/annomate-mcp)](https://pypi.org/project/annomate-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/annomate-mcp)](https://pypi.org/project/annomate-mcp/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Publish](https://github.com/caliperhq/annomate/actions/workflows/publish.yml/badge.svg)](https://github.com/caliperhq/annomate/actions/workflows/publish.yml)
+
 MCP server for [VIA v3](https://gitlab.com/vgg/via) — lets Claude Code read
 and write image annotations in real time alongside the user.
 
