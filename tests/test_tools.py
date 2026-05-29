@@ -911,6 +911,109 @@ def test_grade_annotations_scores_each_region(store, tmp_path):
         assert "mock issue" in r["issues"]
 
 
+# --- Phase 4: via_verify_region with mock verifier ---
+
+
+class _FakeVerifier:
+    model_id = "test/fake-verifier"
+    capabilities = ("verify",)
+
+    def __init__(self, verdict_result):
+        self._verdict = verdict_result
+
+    def verify(self, image_crop, label):
+        return self._verdict
+
+
+def test_verify_region_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    from annotate.models.base import Verdict
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    fake = _FakeVerifier(Verdict("x", "yes", 0.9))
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    reg._loaded["verify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_verify_region(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_verify_region_label_missing(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Add a region with no label
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 50, 50, 100, 100], av={})
+    mid = json.loads(_text(add))["metadata_id"]
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_verify_region(store, registry_map, reg, metadata_id=mid)
+    assert "no label" in _text(result)
+
+
+def test_verify_region_happy_path(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    from annotate.models.base import Verdict
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 200, 200, 200, 200], av={"label": "windscreen"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    fake = _FakeVerifier(Verdict(
+        label_claimed="windscreen",
+        verdict="no",
+        confidence=0.78,
+        supporting=[],
+        contradicting=["a leather helmet covering the head"],
+        suggested_label="leather flying helmet",
+    ))
+    reg = ModelRegistry(default_config())
+    reg._loaded["verify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_verify_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["verdict"] == "no"
+    assert data["suggested_label"] == "leather flying helmet"
+    assert data["crop_window_pixel"][2] >= 200  # crop includes padding
+    assert data["model"] == "test/fake-verifier"
+
+
+# --- Label-match heuristic (no torch needed) ---
+
+def test_label_match_finds_token_overlap():
+    from annotate.models.florence2 import _label_match
+    ok, conf = _label_match("a brown leather flying helmet with goggles", "leather helmet")
+    assert ok is True
+    assert conf > 0.7
+
+
+def test_label_match_misses_unrelated():
+    from annotate.models.florence2 import _label_match
+    ok, _ = _label_match("a windscreen", "leather helmet")
+    assert ok is False
+
+
+def test_extract_suggested_label_pulls_noun_phrase():
+    from annotate.models.florence2 import _extract_suggested_label
+    assert _extract_suggested_label("A brown leather helmet with goggles") == "brown leather helmet"
+    assert _extract_suggested_label("the small wooden boat") == "small wooden boat"
+
+
 # --- shape-encoding-fit heuristic (no torch needed) ---
 
 def test_shape_encoding_fit_flags_very_long_rectangles():

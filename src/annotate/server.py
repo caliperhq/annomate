@@ -1123,6 +1123,91 @@ def handle_grade_annotations(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: via_verify_region
+# ---------------------------------------------------------------------------
+
+def handle_verify_region(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_verify_region", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    region = project.get("metadata", {}).get(metadata_id)
+    if region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+    label = (region.get("av") or {}).get("1", "")
+    if not label:
+        return _text(f"Region {metadata_id!r} has no label — nothing to verify.")
+
+    vid = region.get("vid")
+    fid = _resolve_fid_for_vid(project, vid) if vid else None
+    if fid is None:
+        return _text(f"Could not resolve fid for region {metadata_id!r}.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    xy = region.get("xy") or []
+    head = xy[0] if xy else 0
+    shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+    bbox = _region_bbox_orig(shape, xy[1:])
+    if bbox is None:
+        return _text(f"Region {metadata_id!r} has unsupported shape for verification.")
+    x0, y0, x1, y1 = bbox
+    # Clamp + minimum padding around the crop so the VLM has context
+    W, H = img.size
+    pad_x = max(8, int((x1 - x0) * 0.1))
+    pad_y = max(8, int((y1 - y0) * 0.1))
+    cx0 = max(0, int(x0) - pad_x)
+    cy0 = max(0, int(y0) - pad_y)
+    cx1 = min(W, int(x1) + pad_x)
+    cy1 = min(H, int(y1) + pad_y)
+    crop = img.crop((cx0, cy0, cx1, cy1))
+
+    try:
+        from annotate.models import florence2  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("verify", "verify",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_verify_region", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load verifier: {e}")
+
+    try:
+        verdict = adapter.verify(crop, label)
+    except Exception as e:
+        return _text(f"Verifier raised: {e}")
+
+    response = {
+        "metadata_id": metadata_id,
+        "model": adapter.model_id,
+        "label_claimed": verdict.label_claimed,
+        "verdict": verdict.verdict,
+        "confidence": round(verdict.confidence, 3),
+        "supporting": verdict.supporting,
+        "contradicting": verdict.contradicting,
+        "suggested_label": verdict.suggested_label,
+        "crop_window_pixel": [cx0, cy0, cx1 - cx0, cy1 - cy0],
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # main() and async MCP runner
 # ---------------------------------------------------------------------------
 
@@ -1640,7 +1725,11 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     pipeline=arguments.get("pipeline"),
                 )
             if name == "via_verify_region":
-                return _ai_stub_response(name, registry)
+                return handle_verify_region(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    pipeline=arguments.get("pipeline"),
+                )
             return _text(f"Unknown tool: {name}")
         except KeyError as e:
             return _text(f"Missing required argument: {e}")
