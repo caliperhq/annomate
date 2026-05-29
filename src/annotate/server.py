@@ -926,6 +926,203 @@ def handle_suggest_regions(
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: via_tighten_region + via_grade_annotations
+# ---------------------------------------------------------------------------
+
+def handle_tighten_region(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    auto_apply: bool = False,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_tighten_region", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    region = project.get("metadata", {}).get(metadata_id)
+    if region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+
+    vid = region.get("vid")
+    fid = _resolve_fid_for_vid(project, vid) if vid else None
+    if fid is None:
+        return _text(f"Could not resolve fid for region {metadata_id!r}.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    xy = region.get("xy") or []
+    if not xy:
+        return _text(f"Region {metadata_id!r} has no xy.")
+    shape = xy[0]
+    coords = xy[1:]
+    bbox = _region_bbox_orig(int(shape) if isinstance(shape, (int, float)) else 0, coords)
+    if bbox is None:
+        return _text(f"Region {metadata_id!r} has unsupported shape {shape!r} for tightening.")
+    x0, y0, x1, y1 = bbox
+
+    # Eager-import segment adapters
+    try:
+        from annotate.models import sam2  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("segment", "segment",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_tighten_region", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load segmenter: {e}")
+
+    try:
+        mask = adapter.segment(img, box=(x0, y0, x1, y1))
+    except Exception as e:
+        return _text(f"Segmenter raised: {e}")
+
+    W, H = img.size
+    # Tightened bbox in original-pixel space for round-tripping
+    _, tx_f, ty_f, tw_f, th_f = mask.xy
+    tightened_pixel = [2, int(tx_f * W), int(ty_f * H), int(tw_f * W), int(th_f * H)]
+
+    applied = False
+    if auto_apply:
+        project["metadata"][metadata_id]["xy"] = tightened_pixel
+        store.set_project(project)
+        applied = True
+
+    response = {
+        "metadata_id": metadata_id,
+        "model": adapter.model_id,
+        "current_xy_pixel": list(xy),
+        "tightened_xy_pixel": tightened_pixel,
+        "tightened_xy_fraction": [round(v, 4) if isinstance(v, float) else v for v in mask.xy],
+        "iou_with_input": round(mask.iou_with_input, 4) if mask.iou_with_input is not None else None,
+        "mask_area_fraction": round(mask.area_fraction, 6) if mask.area_fraction is not None else None,
+        "auto_applied": applied,
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+def handle_grade_annotations(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    mids: list[str] | None = None,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_grade_annotations", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    view_to_fids = {
+        v: [str(x) for x in vd.get("fid_list", [])]
+        for v, vd in project.get("view", {}).items()
+    }
+    candidates: list[tuple[str, dict]] = []
+    for mid, m in project.get("metadata", {}).items():
+        if mids is not None and mid not in mids:
+            continue
+        if str(fid) not in view_to_fids.get(m.get("vid", ""), []):
+            continue
+        candidates.append((mid, m))
+
+    if not candidates:
+        return _text(json.dumps({
+            "fid": fid,
+            "regions": [],
+            "overall": {"flagged_count": 0, "graded_count": 0},
+            "notes": ["no regions on this fid match the filter"],
+        }, indent=2))
+
+    # Eager-import grader adapters
+    try:
+        from annotate.models import clip_grader  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("grade", "grade",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_grade_annotations", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load grader: {e}")
+
+    region_results: list[dict] = []
+    flagged = 0
+    pos_sum = size_sum = match_sum = 0.0
+    for mid, m in candidates:
+        label = (m.get("av") or {}).get("1", "")
+        if not label:
+            region_results.append({
+                "metadata_id": mid, "label": "", "skipped": "no label",
+            })
+            continue
+        try:
+            grade = adapter.grade(img, {**m, "_mid": mid}, label)
+        except Exception as e:
+            region_results.append({
+                "metadata_id": mid, "label": label, "error": str(e),
+            })
+            continue
+        is_flagged = (
+            grade.position < 0.7 or grade.size < 0.7
+            or grade.label_match < 0.5 or grade.shape_encoding_fit != "good"
+        )
+        if is_flagged:
+            flagged += 1
+        pos_sum += grade.position
+        size_sum += grade.size
+        match_sum += grade.label_match
+        region_results.append({
+            "metadata_id": mid,
+            "label": label,
+            "position": round(grade.position, 3),
+            "size": round(grade.size, 3),
+            "label_match": round(grade.label_match, 3),
+            "shape_encoding_fit": grade.shape_encoding_fit,
+            "issues": grade.issues,
+            "flagged": is_flagged,
+        })
+
+    n = max(1, sum(1 for r in region_results if "error" not in r and "skipped" not in r))
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "graded_count": n,
+        "overall": {
+            "mean_position": round(pos_sum / n, 3),
+            "mean_size": round(size_sum / n, 3),
+            "mean_label_match": round(match_sum / n, 3),
+            "flagged_count": flagged,
+        },
+        "regions": region_results,
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # main() and async MCP runner
 # ---------------------------------------------------------------------------
 
@@ -1428,7 +1625,21 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     min_confidence=float(arguments.get("min_confidence", 0.3)),
                     pipeline=arguments.get("pipeline"),
                 )
-            if name in ("via_tighten_region", "via_verify_region", "via_grade_annotations"):
+            if name == "via_tighten_region":
+                return handle_tighten_region(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    auto_apply=bool(arguments.get("auto_apply", False)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_grade_annotations":
+                return handle_grade_annotations(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    mids=arguments.get("mids"),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_verify_region":
                 return _ai_stub_response(name, registry)
             return _text(f"Unknown tool: {name}")
         except KeyError as e:

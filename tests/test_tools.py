@@ -774,6 +774,167 @@ def test_suggest_regions_broad_prompts_uses_default_set(store, tmp_path):
     assert data["prompts"] == DEFAULT_BROAD_PROMPTS
 
 
+# --- Phase 3: via_tighten_region + via_grade_annotations with mocks ---
+
+
+class _FakeSegmenter:
+    model_id = "test/fake-segmenter"
+    capabilities = ("segment",)
+
+    def __init__(self, return_xy_fraction, iou=0.85, area_fraction=0.02):
+        from annotate.models.base import Mask
+        self._result = Mask(
+            xy=return_xy_fraction,
+            iou_with_input=iou,
+            area_fraction=area_fraction,
+            raster=None,
+        )
+
+    def segment(self, image, **kwargs):
+        return self._result
+
+
+class _FakeGrader:
+    model_id = "test/fake-grader"
+    capabilities = ("grade",)
+
+    def __init__(self, position=0.8, size=0.7, label_match=0.65, fit="good"):
+        self._kw = dict(position=position, size=size, label_match=label_match, fit=fit)
+
+    def grade(self, image, region, label):
+        from annotate.models.base import Grade
+        return Grade(
+            mid=region.get("_mid", ""),
+            label=label,
+            position=self._kw["position"],
+            size=self._kw["size"],
+            label_match=self._kw["label_match"],
+            shape_encoding_fit=self._kw["fit"],
+            issues=["mock issue"] if self._kw["fit"] != "good" else [],
+        )
+
+
+def _registry_with_pipeline(adapter, pipeline_key="segment.default"):
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    reg._loaded[pipeline_key] = _LoadedEntry(adapter, time.monotonic())
+    return reg
+
+
+def test_tighten_region_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.1, 0.1, 0.2, 0.2]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_tighten_region_returns_tightened_box_without_writing(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    # Segmenter returns a tighter box at 20%-30% in fraction coords
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["auto_applied"] is False
+    assert data["tightened_xy_pixel"] == [2, 200, 200, 300, 300]
+    # Region in the store should be unchanged
+    project = store.get()
+    assert project["metadata"][mid]["xy"] == [2, 100, 100, 400, 400]
+
+
+def test_tighten_region_auto_apply_writes_back(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    handle_tighten_region(store, registry_map, reg, metadata_id=mid, auto_apply=True)
+    project = store.get()
+    assert project["metadata"][mid]["xy"] == [2, 200, 200, 300, 300]
+
+
+def test_grade_annotations_empty_fid_returns_empty_set(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_grade_annotations
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _registry_with_pipeline(_FakeGrader(), pipeline_key="grade.default")
+    result = handle_grade_annotations(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["regions"] == []
+    assert data["overall"]["flagged_count"] == 0
+
+
+def test_grade_annotations_scores_each_region(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_grade_annotations
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 100, 100, 200, 200], av={"label": "cat"})
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 500, 500, 200, 200], av={"label": "dog"})
+    # A grader that fails: position=0.3 → should be flagged
+    reg = _registry_with_pipeline(_FakeGrader(position=0.3, size=0.4, label_match=0.4,
+                                              fit="marginal"),
+                                   pipeline_key="grade.default")
+    result = handle_grade_annotations(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["graded_count"] == 2
+    assert data["overall"]["flagged_count"] == 2
+    for r in data["regions"]:
+        assert r["flagged"] is True
+        assert "mock issue" in r["issues"]
+
+
+# --- shape-encoding-fit heuristic (no torch needed) ---
+
+def test_shape_encoding_fit_flags_very_long_rectangles():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    # 600px wide × 50px tall — aspect 12 → marginal
+    fit, note = _shape_encoding_fit([2, 0, 0, 600, 50], (0, 0, 600, 50))
+    assert fit == "marginal"
+    assert "polyline" in note
+
+
+def test_shape_encoding_fit_passes_balanced_rectangles():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    fit, note = _shape_encoding_fit([2, 0, 0, 200, 150], (0, 0, 200, 150))
+    assert fit == "good"
+    assert note is None
+
+
+def test_shape_encoding_fit_flags_non_square_circle():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    # Circle whose bbox is 200×100 — should suggest ellipse instead
+    fit, _ = _shape_encoding_fit([3, 100, 50, 50], (0, 0, 200, 100))
+    assert fit == "marginal"
+
+
 # --- Phase 1: local-model stub tools ---
 
 def test_model_status_with_no_registry_returns_disabled():
