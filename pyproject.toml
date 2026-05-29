@@ -52,6 +52,12 @@ io = [
     # (apt: poppler-utils; brew: poppler; emerge: app-text/poppler)
     "pdf2image>=1.17",
 ]
+# OCR layer — uses the tesseract CLI (apt: tesseract-ocr +
+# tesseract-ocr-<lang>; brew: tesseract tesseract-lang;
+# emerge: app-text/tesseract with the right LINGUAS USE flags).
+ocr = [
+    "pytesseract>=0.3",
+]
 
 [project.scripts]
 annotate = "annotate.server:main"

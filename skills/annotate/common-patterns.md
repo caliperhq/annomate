@@ -50,6 +50,13 @@ or `pages=[2]` for just page 3 (0-based). Each page becomes its own
 file entry that the rest of the tools treat as a normal image.
 Requires the `[io]` extra and `poppler-utils` on PATH.
 
+**"Read the text in this image" / "OCR this label"**
+→ `via_run_ocr(fid)` for the whole image, or
+`via_run_ocr(fid, region_bbox=[x,y,w,h])` for a sub-region. Returns
+word-level boxes in the same candidate shape as `via_suggest_regions`
+— accept the good ones via `via_add_region`. Use `lang="eng+spa"` for
+multi-language. Needs `[ocr]` and the `tesseract` CLI on PATH.
+
 ## Verification + diff
 
 **"That box looks off — let me check"**

@@ -89,6 +89,7 @@ For the recurring failure modes that even a careful loop misses, read
 | Save project JSON to disk | `via_save_project` |
 | Read EXIF / GPS / camera metadata | `via_read_metadata` |
 | Load a PDF as one file per page | `via_load_document` |
+| OCR an image / region → word boxes | `via_run_ocr` |
 
 ### Local-model assistance (optional; needs `pip install 'annotate[ai]'`)
 

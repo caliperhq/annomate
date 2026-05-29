@@ -314,3 +314,119 @@ def test_handle_load_document_rejects_non_pdf(tmp_path):
     registry: dict = {}
     result = handle_load_document(store, registry, 9669, str(img_path), "all")
     assert "PDF" in result[0].text
+
+
+# --- OCR (skips when pytesseract / tesseract binary not installed) ---
+
+def _tesseract_available() -> bool:
+    if not image_io.ocr_available():
+        return False
+    import shutil
+    return shutil.which("tesseract") is not None
+
+
+_NEEDS_OCR = pytest.mark.skipif(
+    not _tesseract_available(),
+    reason="pytesseract and/or tesseract binary not installed",
+)
+
+
+def _render_text_image(path: Path, text: str = "HELLO ANNOTATE",
+                       size=(400, 120)) -> Path:
+    """Render plain text onto a white image so Tesseract has something
+    high-contrast to read. PIL ships a default bitmap font that
+    Tesseract handles well even at small sizes."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+    img = PILImage.new("RGB", size, color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+    draw.text((20, 30), text, fill=(0, 0, 0), font=font)
+    img.save(path, "PNG")
+    return path
+
+
+@_NEEDS_OCR
+def test_run_ocr_finds_rendered_words(tmp_path):
+    p = _render_text_image(tmp_path / "hello.png", "HELLO WORLD")
+    from PIL import Image as PILImage
+    img = PILImage.open(p)
+    words = image_io.run_ocr(img, lang="eng", min_confidence=20)
+    texts = [w.text.upper() for w in words]
+    assert any("HELLO" in t for t in texts)
+    assert any("WORLD" in t for t in texts)
+    # Bboxes should be inside the unit square
+    for w in words:
+        assert 0 <= w.x <= 1 and 0 <= w.y <= 1
+        assert 0 < w.w <= 1 and 0 < w.h <= 1
+
+
+@_NEEDS_OCR
+def test_run_ocr_filters_by_confidence(tmp_path):
+    p = _render_text_image(tmp_path / "hi.png", "HI")
+    from PIL import Image as PILImage
+    img = PILImage.open(p)
+    low = image_io.run_ocr(img, min_confidence=0)
+    high = image_io.run_ocr(img, min_confidence=99)
+    assert len(low) >= len(high)
+
+
+@_NEEDS_OCR
+def test_handle_run_ocr_returns_candidates(tmp_path):
+    import json as _json
+    from annotate.store import ProjectStore
+    from annotate.server import handle_add_file, handle_run_ocr
+
+    p = _render_text_image(tmp_path / "hello.png", "HELLO ANNOTATE")
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(p))
+    result = handle_run_ocr(store, registry, fid="1", min_confidence=20)
+    data = _json.loads(result[0].text)
+    assert data["engine"].startswith("tesseract-")
+    assert data["candidate_count"] > 0
+    # At least one candidate should have a matching token
+    texts = [c["label"].upper() for c in data["candidates"]]
+    assert any("HELLO" in t for t in texts)
+
+
+@_NEEDS_OCR
+def test_handle_run_ocr_region_bbox_remaps_coords(tmp_path):
+    """OCR over a sub-region — output coords should be fractions of the
+    *whole* image, not the crop."""
+    import json as _json
+    from annotate.store import ProjectStore
+    from annotate.server import handle_add_file, handle_run_ocr
+
+    p = _render_text_image(tmp_path / "hello.png", "BIG TEXT",
+                            size=(800, 200))
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(p))
+    # OCR only the left half
+    result = handle_run_ocr(store, registry, fid="1",
+                            region_bbox=[0, 0, 0.5, 1.0],
+                            min_confidence=20)
+    data = _json.loads(result[0].text)
+    # Every returned candidate must sit in the left half of the image
+    for c in data["candidates"]:
+        assert c["xy"][1] + c["xy"][3] <= 0.55  # x + w within the queried region (+ tolerance)
+
+
+def test_handle_run_ocr_without_extra_returns_install_hint(tmp_path, monkeypatch):
+    """When pytesseract isn't importable, the handler returns the install
+    hint without trying anything else."""
+    from annotate.store import ProjectStore
+    from annotate.server import handle_add_file, handle_run_ocr
+    from PIL import Image as PILImage
+    monkeypatch.setattr(image_io, "ocr_available", lambda: False)
+
+    p = tmp_path / "x.png"
+    PILImage.new("RGB", (50, 50), color=(255, 255, 255)).save(p, "PNG")
+    store = ProjectStore(state_file=tmp_path / "state.json")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(p))
+    result = handle_run_ocr(store, registry, fid="1")
+    assert "annotate[ocr]" in result[0].text

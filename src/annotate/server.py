@@ -817,6 +817,104 @@ def handle_load_document(
     }, indent=2))
 
 
+def handle_run_ocr(
+    store: ProjectStore,
+    image_registry_map: dict,
+    *,
+    fid: str,
+    lang: str = "eng",
+    min_confidence: int = 60,
+    region_bbox: list | None = None,
+    xy_space: str = "fraction",
+) -> list[types.TextContent]:
+    """Run Tesseract OCR over a file (or a region of it) and return word-
+    level boxes as detection candidates — same shape as
+    ``via_suggest_regions`` so the LLM can review them with the same
+    flow.
+    """
+    from annotate import image_io
+    if not image_io.ocr_available():
+        return _text(
+            "OCR support needs the [ocr] extra: pip install 'annotate[ocr]'. "
+            "You'll also need the tesseract CLI on PATH "
+            "(apt: tesseract-ocr; brew: tesseract; emerge: app-text/tesseract)."
+        )
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID {fid!r} not found.")
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path or not Path(abs_path).exists():
+        return _text(f"Image path not available or missing for fid={fid}.")
+
+    try:
+        image = image_io.open_as_pil(abs_path)
+    except Exception as e:
+        return _text(f"Could not open image: {e}")
+    W, H = image.size
+
+    # Optional region crop
+    crop_offset = (0.0, 0.0)
+    crop_scale = (1.0, 1.0)
+    if region_bbox is not None:
+        if len(region_bbox) != 4:
+            return _text("region_bbox must be [x, y, w, h]")
+        x, y, w, h = region_bbox
+        if xy_space == "fraction":
+            x, w = x * W, w * W
+            y, h = y * H, h * H
+        elif xy_space != "original":
+            return _text(f"xy_space must be 'fraction' or 'original', got {xy_space!r}")
+        cx0 = max(0, int(x)); cy0 = max(0, int(y))
+        cx1 = min(W, int(x + w)); cy1 = min(H, int(y + h))
+        if cx1 <= cx0 or cy1 <= cy0:
+            return _text("region_bbox does not intersect the image.")
+        image = image.crop((cx0, cy0, cx1, cy1))
+        crop_offset = (cx0 / W, cy0 / H)
+        crop_scale = ((cx1 - cx0) / W, (cy1 - cy0) / H)
+
+    try:
+        words = image_io.run_ocr(image, lang=lang, min_confidence=min_confidence)
+    except Exception as e:
+        # pytesseract raises TesseractNotFoundError when the binary's missing.
+        return _text(
+            f"OCR failed: {e}. The tesseract CLI may not be installed "
+            f"(apt: tesseract-ocr; brew: tesseract; emerge: app-text/tesseract)."
+        )
+
+    # Remap coords back to whole-image fractions if we cropped.
+    ox, oy = crop_offset
+    sx, sy = crop_scale
+    candidates = [
+        {
+            "xy": [2,
+                   round(ox + w.x * sx, 6),
+                   round(oy + w.y * sy, 6),
+                   round(w.w * sx, 6),
+                   round(w.h * sy, 6)],
+            "label": w.text,
+            "ocr_text": w.text,
+            "score": round(w.confidence, 4),
+            "line_num": w.line_num,
+            "block_num": w.block_num,
+        }
+        for w in words
+    ]
+
+    return _text(json.dumps({
+        "fid": fid,
+        "engine": f"tesseract-{image_io.tesseract_version() or 'unknown'}",
+        "lang": lang,
+        "min_confidence": min_confidence,
+        "image_dims": [W, H],
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }, indent=2))
+
+
 def handle_read_metadata(
     store: ProjectStore,
     image_registry_map: dict,
@@ -2013,6 +2111,44 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_run_ocr",
+                description=(
+                    "Tesseract OCR over a file (or a region). Returns "
+                    "word-level boxes in the same candidate shape as "
+                    "via_suggest_regions — review and accept via "
+                    "via_add_region. Pass lang='eng+spa' for multi-"
+                    "language; min_confidence is on Tesseract's 0-100 "
+                    "scale (default 60). Optional region_bbox=[x,y,w,h] "
+                    "(fraction by default) limits OCR to that area. "
+                    "Requires the [ocr] extra and the tesseract CLI on "
+                    "PATH."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "lang": {
+                            "type": "string", "default": "eng",
+                            "description": "Tesseract language code(s), e.g. 'eng', 'eng+spa'",
+                        },
+                        "min_confidence": {
+                            "type": "integer", "default": 60,
+                            "description": "Drop words below this 0-100 confidence",
+                        },
+                        "region_bbox": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 4, "maxItems": 4,
+                            "description": "[x, y, w, h] limits OCR to a sub-region",
+                        },
+                        "xy_space": {
+                            "type": "string", "enum": ["fraction", "original"],
+                            "default": "fraction",
+                        },
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
                 name="via_read_metadata",
                 description=(
                     "Read EXIF / XMP / IPTC metadata from an image: capture "
@@ -2303,6 +2439,15 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_read_metadata":
                 return handle_read_metadata(store, image_registry, fid=arguments["fid"])
+            if name == "via_run_ocr":
+                return handle_run_ocr(
+                    store, image_registry,
+                    fid=arguments["fid"],
+                    lang=arguments.get("lang", "eng"),
+                    min_confidence=int(arguments.get("min_confidence", 60)),
+                    region_bbox=arguments.get("region_bbox"),
+                    xy_space=arguments.get("xy_space", "fraction"),
+                )
             if name == "via_model_status":
                 return handle_model_status(registry)
             if name == "via_suggest_regions":

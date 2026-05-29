@@ -362,6 +362,93 @@ def _parse_gps_coord(value, ref) -> float | None:
     return f
 
 
+# ---------------------------------------------------------------------------
+# OCR — Tesseract via pytesseract
+# ---------------------------------------------------------------------------
+
+def ocr_available() -> bool:
+    """True iff pytesseract is importable. Doesn't guarantee the
+    tesseract CLI is on PATH — caller catches that at call time."""
+    try:
+        importlib.import_module("pytesseract")
+        return True
+    except ImportError:
+        return False
+
+
+@dataclass
+class OcrWord:
+    """One word detected by OCR, normalised to fraction-of-image coords."""
+    text: str
+    x: float          # left edge as 0..1 fraction
+    y: float          # top edge
+    w: float          # width
+    h: float          # height
+    confidence: float # tesseract conf 0..100, normalised here to 0..1
+    line_num: int
+    block_num: int
+
+
+def run_ocr(image, *, lang: str = "eng", min_confidence: int = 60) -> list[OcrWord]:
+    """Run Tesseract over a PIL image; return word-level boxes filtered by
+    confidence. ``min_confidence`` is on Tesseract's 0..100 scale; the
+    returned ``confidence`` field is normalised to 0..1."""
+    import pytesseract
+    from pytesseract import Output
+    W, H = image.size
+    data = pytesseract.image_to_data(image, lang=lang, output_type=Output.DICT)
+
+    out: list[OcrWord] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        try:
+            conf = int(float(data["conf"][i]))
+        except (TypeError, ValueError):
+            conf = -1
+        if conf < min_confidence:
+            continue
+        text = (data["text"][i] or "").strip()
+        if not text:
+            continue
+        x = int(data["left"][i])
+        y = int(data["top"][i])
+        w = int(data["width"][i])
+        h = int(data["height"][i])
+        if w <= 0 or h <= 0:
+            continue
+        out.append(OcrWord(
+            text=text,
+            x=x / W, y=y / H, w=w / W, h=h / H,
+            confidence=conf / 100.0,
+            line_num=int(data.get("line_num", [0]*n)[i]),
+            block_num=int(data.get("block_num", [0]*n)[i]),
+        ))
+    return out
+
+
+def tesseract_version() -> str | None:
+    """Return tesseract CLI version string, or None if not on PATH."""
+    if not ocr_available():
+        return None
+    try:
+        import pytesseract
+        return str(pytesseract.get_tesseract_version())
+    except Exception:
+        return None
+
+
+def tesseract_languages() -> list[str] | None:
+    """Return tesseract's installed language pack codes (`eng`, `spa`, ...)
+    or None if the CLI isn't reachable."""
+    if not ocr_available():
+        return None
+    try:
+        import pytesseract
+        return sorted(pytesseract.get_languages(config=""))
+    except Exception:
+        return None
+
+
 def _dms_to_decimal(dms, ref) -> float | None:
     """Pillow returns GPS as [(degrees, ?), (minutes, ?), (seconds, ?)]
     rational tuples; convert to signed decimal."""
