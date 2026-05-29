@@ -37,13 +37,21 @@ class VIAHandler(BaseHTTPRequestHandler):
         if abs_path is None:
             self._respond(404, "text/plain", b"Not found")
             return
+        # Translate non-browser-native formats to a cached JPEG, on disk
+        # in platformdirs.user_cache_dir. PIL-native browser formats
+        # (jpg/png/gif/webp) get the original path back unchanged.
         try:
-            with open(abs_path, "rb") as f:
+            from annotate import image_io
+            serve_path = image_io.cached_browser_path(abs_path)
+        except (LookupError, ImportError):
+            serve_path = abs_path
+        try:
+            with open(serve_path, "rb") as f:
                 data = f.read()
         except OSError:
             self._respond(404, "text/plain", b"Not found")
             return
-        mime = mimetypes.guess_type(abs_path)[0] or "application/octet-stream"
+        mime = mimetypes.guess_type(str(serve_path))[0] or "application/octet-stream"
         self._respond(200, mime, data)
 
     def do_HEAD(self):

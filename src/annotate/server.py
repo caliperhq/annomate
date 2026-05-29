@@ -24,6 +24,9 @@ import mcp.types as types
 import platformdirs
 
 from annotate.store import ProjectStore
+# Eager import: registers pillow-heif as a Pillow opener at import time
+# (when [io] is installed), so PIL.Image.open() handles HEIC everywhere.
+from annotate import image_io  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +197,48 @@ def _next_id(mapping: dict) -> int:
 # Tool handlers — take store as first arg for testability
 # ---------------------------------------------------------------------------
 
-def handle_get_project(store: ProjectStore) -> list[types.TextContent]:
+def handle_get_project(store: ProjectStore, full: bool = False) -> list[types.TextContent]:
     project = store.get()
     if project is None:
         return _text("No project loaded. Ask the user to open the VIA annotator and push a project.")
-    return _text(json.dumps(project, indent=2))
+    if full:
+        return _text(json.dumps(project, indent=2))
+
+    metadata = project.get("metadata", {})
+    files = project.get("file", {})
+    views = project.get("view", {})
+
+    fid_to_vid: dict[str, str] = {}
+    for vid, v in views.items():
+        for fid in v.get("fid_list", []):
+            fid_to_vid[str(fid)] = vid
+
+    vid_region_count: dict[str, int] = {}
+    for m in metadata.values():
+        vid = m.get("vid", "")
+        vid_region_count[vid] = vid_region_count.get(vid, 0) + 1
+
+    files_summary = [
+        {
+            "fid": fid,
+            "fname": f.get("fname", ""),
+            "vid": fid_to_vid.get(fid, ""),
+            "region_count": vid_region_count.get(fid_to_vid.get(fid, ""), 0),
+        }
+        for fid, f in files.items()
+    ]
+
+    proj = project.get("project", {})
+    return _text(json.dumps({
+        "pid": proj.get("pid"),
+        "pname": proj.get("pname"),
+        "rev": proj.get("rev"),
+        "file_count": len(files),
+        "region_count": len(metadata),
+        "files": files_summary,
+        "attributes": project.get("attribute", {}),
+        "note": "Pass full=true to get the complete project JSON.",
+    }, indent=2))
 
 
 def handle_list_files(store: ProjectStore) -> list[types.TextContent]:
@@ -237,18 +277,59 @@ def handle_get_annotations(
     store: ProjectStore,
     image_registry: dict,
     vid: str | None,
-    format: str = "pixel",
+    format: str = "fraction",
 ) -> list[types.TextContent]:
     project = store.get()
     if project is None:
         return _text("No project loaded.")
     if format not in ("pixel", "fraction", "both"):
         return _text(f"format must be 'pixel', 'fraction', or 'both', got {format!r}")
+
     metadata = project.get("metadata", {})
-    if vid is not None:
-        metadata = {mid: m for mid, m in metadata.items() if m.get("vid") == vid}
+
+    if vid is None:
+        # Summary mode: per-file region counts + label lists
+        files = project.get("file", {})
+        views = project.get("view", {})
+
+        fid_to_vid: dict[str, str] = {}
+        for v_id, v in views.items():
+            for fid in v.get("fid_list", []):
+                fid_to_vid[str(fid)] = v_id
+
+        vid_stats: dict[str, dict] = {}
+        for mid, m in metadata.items():
+            v = m.get("vid", "")
+            if v not in vid_stats:
+                vid_stats[v] = {"region_count": 0, "labels": []}
+            vid_stats[v]["region_count"] += 1
+            label = (m.get("av") or {}).get("1", "")
+            if label and label not in vid_stats[v]["labels"]:
+                vid_stats[v]["labels"].append(label)
+
+        files_summary = []
+        for fid, f in files.items():
+            v_id = fid_to_vid.get(fid, "")
+            stats = vid_stats.get(v_id, {"region_count": 0, "labels": []})
+            files_summary.append({
+                "fid": fid,
+                "vid": v_id,
+                "fname": f.get("fname", ""),
+                "region_count": stats["region_count"],
+                "labels": sorted(stats["labels"]),
+            })
+
+        return _text(json.dumps({
+            "total_regions": len(metadata),
+            "files": files_summary,
+            "note": "Pass vid=<vid> to get full annotations for a specific view.",
+        }, indent=2))
+
+    # Per-view full annotations
+    metadata = {mid: m for mid, m in metadata.items() if m.get("vid") == vid}
     if format == "pixel":
         return _text(json.dumps(metadata, indent=2))
+
     # 'fraction' or 'both' — resolve dims per region via its vid's fid_list
     dims_cache: dict[str, tuple[int, int] | None] = {}
 
@@ -265,9 +346,7 @@ def handle_get_annotations(
         v = m.get("vid", "")
         d = dims_for(v)
         if d is None:
-            # dims unavailable — keep pixel coords and flag it
-            entry = {**m, "_dims_unavailable": True}
-            out[mid] = entry
+            out[mid] = {**m, "_dims_unavailable": True}
             continue
         w, h = d
         frac_xy = _xy_to_fraction(m.get("xy") or [], w, h)
@@ -379,11 +458,18 @@ def handle_add_file(
     port: int,
     path: str,
 ) -> list[types.TextContent]:
+    from annotate import image_io
     abs_path = Path(path).resolve()
     if not abs_path.exists():
         return _text(f"File not found: {abs_path}")
-    suffix = abs_path.suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"}:
+    klass = image_io.detect(abs_path)
+    if klass is image_io.LoaderClass.UNKNOWN:
+        suffix = abs_path.suffix.lower()
+        if suffix in {".heic", ".heif", ".avif"}:
+            return _text(
+                f"HEIC/HEIF/AVIF support needs the [io] extra: "
+                f"pip install 'annotate[io]'"
+            )
         return _text(f"Unsupported image format: {suffix}")
 
     project = store.get()
@@ -709,6 +795,1124 @@ def handle_save_project(store: ProjectStore, path: str) -> list[types.TextConten
 
 
 # ---------------------------------------------------------------------------
+# IO layer — metadata reader
+# ---------------------------------------------------------------------------
+
+def handle_load_document(
+    store: ProjectStore,
+    image_registry: dict,
+    port: int,
+    path: str,
+    pages,
+) -> list[types.TextContent]:
+    """Load a multi-page document (PDF, etc.) as one file entry per page.
+
+    Each page is rasterised to a JPEG via image_io's cache, then
+    registered exactly like a normal image. File entries gain
+    ``source_pdf`` + ``source_pdf_page`` fields for traceability;
+    these survive push/pull (VIA ignores unknown keys).
+    """
+    from annotate import image_io
+    abs_path = Path(path).resolve()
+    if not abs_path.exists():
+        return _text(f"File not found: {abs_path}")
+    klass = image_io.detect(abs_path)
+    if klass is not image_io.LoaderClass.PDF:
+        return _text(
+            f"via_load_document currently supports PDF only; got {abs_path.suffix!r}."
+        )
+    if not image_io.pdf_available():
+        return _text("PDF support needs the [io] extra: pip install 'annotate[io]'")
+
+    try:
+        page_count = image_io.pdf_page_count(abs_path)
+    except Exception as e:
+        return _text(
+            f"Failed to read PDF page count ({e}). "
+            f"poppler-utils may not be installed (apt: poppler-utils; brew: poppler)."
+        )
+
+    # Normalise the pages argument to a sorted 0-based index list.
+    if pages == "all" or pages is None:
+        page_indices = list(range(page_count))
+    elif isinstance(pages, int):
+        page_indices = [pages]
+    elif isinstance(pages, list):
+        page_indices = sorted({int(p) for p in pages})
+    else:
+        return _text("pages must be 'all', an int, or a list of ints")
+
+    page_indices = [p for p in page_indices if 0 <= p < page_count]
+    if not page_indices:
+        return _text(f"No valid pages requested (PDF has {page_count}).")
+
+    project = store.get()
+    if project is None:
+        project = _minimal_project()
+
+    fids: list[str] = []
+    converted_paths: list[str] = []
+    for page_idx in page_indices:
+        try:
+            jpeg_path = image_io.cached_browser_path(abs_path, page=page_idx)
+        except Exception as e:
+            return _text(f"Failed to convert page {page_idx + 1}: {e}")
+
+        # Synthetic filename per page, conflict-resolved against the registry.
+        stem = abs_path.stem
+        fname = f"{stem}_p{page_idx + 1:03d}.jpg"
+        if fname in image_registry and image_registry[fname] != str(jpeg_path):
+            counter = 2
+            while f"{stem}_p{page_idx + 1:03d}_{counter}.jpg" in image_registry:
+                counter += 1
+            fname = f"{stem}_p{page_idx + 1:03d}_{counter}.jpg"
+
+        image_registry[fname] = str(jpeg_path)
+        src = f"http://localhost:{port}/img/{fname}"
+        fid = _next_id(project["file"])
+        vid = _next_id(project["view"])
+        project["file"][str(fid)] = {
+            "fid": fid, "fname": fname, "type": 2, "loc": 2, "src": src,
+            "abs_path": str(jpeg_path),
+            "source_pdf": str(abs_path),
+            "source_pdf_page": page_idx,
+        }
+        project["view"][str(vid)] = {"fid_list": [fid]}
+        project["project"].setdefault("vid_list", []).append(str(vid))
+        fids.append(str(fid))
+        converted_paths.append(str(jpeg_path))
+
+    store.set_project(project)
+    return _text(json.dumps({
+        "fids": fids,
+        "loader": "pdf2image",
+        "source_pdf": str(abs_path),
+        "page_count": page_count,
+        "pages_loaded": [p + 1 for p in page_indices],   # 1-based for humans
+        "cached_at": converted_paths,
+    }, indent=2))
+
+
+def handle_run_ocr(
+    store: ProjectStore,
+    image_registry_map: dict,
+    *,
+    fid: str,
+    lang: str = "eng",
+    min_confidence: int = 60,
+    region_bbox: list | None = None,
+    xy_space: str = "fraction",
+) -> list[types.TextContent]:
+    """Run Tesseract OCR over a file (or a region of it) and return word-
+    level boxes as detection candidates — same shape as
+    ``via_suggest_regions`` so the LLM can review them with the same
+    flow.
+    """
+    from annotate import image_io
+    if not image_io.ocr_available():
+        return _text(
+            "OCR support needs the [ocr] extra: pip install 'annotate[ocr]'. "
+            "You'll also need the tesseract CLI on PATH "
+            "(apt: tesseract-ocr; brew: tesseract; emerge: app-text/tesseract)."
+        )
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID {fid!r} not found.")
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path or not Path(abs_path).exists():
+        return _text(f"Image path not available or missing for fid={fid}.")
+
+    try:
+        image = image_io.open_as_pil(abs_path)
+    except Exception as e:
+        return _text(f"Could not open image: {e}")
+    W, H = image.size
+
+    # Optional region crop
+    crop_offset = (0.0, 0.0)
+    crop_scale = (1.0, 1.0)
+    if region_bbox is not None:
+        if len(region_bbox) != 4:
+            return _text("region_bbox must be [x, y, w, h]")
+        x, y, w, h = region_bbox
+        if xy_space == "fraction":
+            x, w = x * W, w * W
+            y, h = y * H, h * H
+        elif xy_space != "original":
+            return _text(f"xy_space must be 'fraction' or 'original', got {xy_space!r}")
+        cx0 = max(0, int(x)); cy0 = max(0, int(y))
+        cx1 = min(W, int(x + w)); cy1 = min(H, int(y + h))
+        if cx1 <= cx0 or cy1 <= cy0:
+            return _text("region_bbox does not intersect the image.")
+        image = image.crop((cx0, cy0, cx1, cy1))
+        crop_offset = (cx0 / W, cy0 / H)
+        crop_scale = ((cx1 - cx0) / W, (cy1 - cy0) / H)
+
+    try:
+        words = image_io.run_ocr(image, lang=lang, min_confidence=min_confidence)
+    except Exception as e:
+        # pytesseract raises TesseractNotFoundError when the binary's missing.
+        return _text(
+            f"OCR failed: {e}. The tesseract CLI may not be installed "
+            f"(apt: tesseract-ocr; brew: tesseract; emerge: app-text/tesseract)."
+        )
+
+    # Remap coords back to whole-image fractions if we cropped.
+    ox, oy = crop_offset
+    sx, sy = crop_scale
+    candidates = [
+        {
+            "xy": [2,
+                   round(ox + w.x * sx, 6),
+                   round(oy + w.y * sy, 6),
+                   round(w.w * sx, 6),
+                   round(w.h * sy, 6)],
+            "label": w.text,
+            "ocr_text": w.text,
+            "score": round(w.confidence, 4),
+            "line_num": w.line_num,
+            "block_num": w.block_num,
+        }
+        for w in words
+    ]
+
+    return _text(json.dumps({
+        "fid": fid,
+        "engine": f"tesseract-{image_io.tesseract_version() or 'unknown'}",
+        "lang": lang,
+        "min_confidence": min_confidence,
+        "image_dims": [W, H],
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }, indent=2))
+
+
+def handle_read_metadata(
+    store: ProjectStore,
+    image_registry_map: dict,
+    fid: str,
+) -> list[types.TextContent]:
+    """Return EXIF / XMP / IPTC metadata for a file. Uses ExifTool when
+    available, falls back to Pillow's `_getexif()` for JPEG/TIFF/HEIC.
+    """
+    from annotate import image_io
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID {fid!r} not found.")
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return _text(f"Image path not available for fid={fid}.")
+    if not Path(abs_path).exists():
+        return _text(f"Image file not found at {abs_path}")
+
+    meta = image_io.open_metadata(abs_path)
+    # Drop the raw blob from the default response — keep the structured
+    # fields the LLM actually needs. Users can ask for it explicitly.
+    payload = {
+        "fid": fid,
+        "fname": file_entry.get("fname"),
+        "source": meta.source,
+        "capture_time": meta.capture_time,
+        "gps": meta.gps,
+        "camera": meta.camera,
+        "lens": meta.lens,
+        "exposure": meta.exposure,
+        "orientation": meta.orientation,
+        "dims": [meta.width, meta.height] if meta.width and meta.height else None,
+    }
+    return _text(json.dumps(payload, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# Local-model assistance (Phase 1 — registry + stub tools, no weights yet)
+# ---------------------------------------------------------------------------
+
+def handle_model_status(registry) -> list[types.TextContent]:
+    if registry is None:
+        return _text(json.dumps({
+            "ai_extra_available": False,
+            "loaded": [],
+            "configured_pipelines": [],
+            "hint": "Local-model assistance is disabled. Install with: pip install 'annotate[ai]'",
+        }, indent=2))
+    return _text(json.dumps(registry.status(), indent=2))
+
+
+def handle_capabilities(store: ProjectStore, registry) -> list[types.TextContent]:
+    """Return a full inventory: server version, extras, binaries, AI pipelines."""
+    import shutil
+    import sys
+
+    try:
+        from importlib.metadata import version as _pkg_ver
+        server_version = _pkg_ver("annotate")
+    except Exception:
+        server_version = "dev"
+
+    def _has(pkg: str) -> bool:
+        try:
+            __import__(pkg)
+            return True
+        except ImportError:
+            return False
+
+    extras = {
+        "ai": _has("torch"),
+        "io": _has("pillow_heif") or _has("pdf2image"),
+        "ocr": _has("pytesseract"),
+        "yolo": _has("ultralytics"),
+        "chat": _has("qwen_vl_utils"),
+    }
+
+    system_binaries = {
+        "exiftool": shutil.which("exiftool") is not None,
+        "tesseract": shutil.which("tesseract") is not None,
+        "poppler_utils": shutil.which("pdftoppm") is not None,
+    }
+
+    project = store.get()
+    project_summary = None
+    if project is not None:
+        project_summary = {
+            "pid": project["project"].get("pid"),
+            "rev": project["project"].get("rev"),
+            "file_count": len(project.get("file", {})),
+            "region_count": len(project.get("metadata", {})),
+        }
+
+    response = {
+        "server_version": server_version,
+        "python_version": sys.version,
+        "extras": extras,
+        "system_binaries": system_binaries,
+        "ai_pipelines": registry.status()["configured_pipelines"] if registry is not None else [],
+        "project": project_summary,
+        "note": (
+            "annotator_version field for .training/ files: use this server_version. "
+            "ai_pipelines lists configured (not necessarily loaded) pipelines."
+        ),
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+def _ai_stub_response(tool_name: str, registry, reason: str | None = None) -> list[types.TextContent]:
+    """Returned by AI tools whose adapter isn't available yet. Carries
+    enough context for the LLM to either suggest an install or pick a
+    different pipeline.
+    """
+    from annotate.models import ai_extra_available
+
+    msg = {
+        "tool": tool_name,
+        "available": False,
+        "reason": reason or (
+            "Local-model assistance tools are scaffolded but the requested "
+            "capability has no adapter registered for the configured model."
+        ),
+        "ai_extra_installed": ai_extra_available(),
+    }
+    if not msg["ai_extra_installed"]:
+        msg["install_hint"] = "pip install 'annotate[ai]'"
+    if registry is not None:
+        msg["registered_adapter_prefixes"] = registry.status()["registered_adapter_prefixes"]
+        msg["configured_pipelines"] = registry.status()["configured_pipelines"]
+    return _text(json.dumps(msg, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: detection (open-vocab) + tiling
+# ---------------------------------------------------------------------------
+
+def _open_image(project: dict, image_registry_map: dict, fid: str):
+    """Return (PIL.Image, abs_path_str) or (None, error_text)."""
+    from PIL import Image as PILImage
+    from pathlib import Path as _Path
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return None, f"File ID {fid!r} not found."
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return None, f"Image path not available for fid={fid}."
+    p = _Path(abs_path)
+    if not p.exists():
+        return None, f"Image file not found at {abs_path}."
+    return PILImage.open(p), str(p)
+
+
+def _existing_boxes_fraction(
+    project: dict, image_registry_map: dict, fid: str,
+) -> list[tuple[float, float, float, float]]:
+    """Return existing region rect bboxes in fraction space for the given fid.
+
+    Non-rect shapes are converted to their axis-aligned bbox.
+    """
+    dims = _image_dims(project, image_registry_map, str(fid))
+    if dims is None:
+        return []
+    w, h = dims
+    if w <= 0 or h <= 0:
+        return []
+
+    view_to_fids = {
+        vid: [str(x) for x in v.get("fid_list", [])]
+        for vid, v in project.get("view", {}).items()
+    }
+    out: list[tuple[float, float, float, float]] = []
+    for _mid, m in project.get("metadata", {}).items():
+        if str(fid) not in view_to_fids.get(m.get("vid", ""), []):
+            continue
+        xy = m.get("xy") or []
+        if not xy:
+            continue
+        head = xy[0]
+        shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+        bbox = _region_bbox_orig(shape, xy[1:])
+        if bbox is None:
+            continue
+        x0, y0, x1, y1 = bbox
+        out.append((x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h))
+    return out
+
+
+def handle_suggest_regions(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    prompts: list[str] | None,
+    tiling: str = "auto",
+    exclude_existing: bool = False,
+    broad_prompts: bool = False,
+    min_confidence: float = 0.3,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+    from annotate.models.tiling import (
+        DEFAULT_BROAD_PROMPTS, CandidateBox, auto_grid, filter_existing,
+        generate_tiles, nms_merge, parse_grid,
+    )
+
+    if registry is None:
+        return _ai_stub_response(
+            "via_suggest_regions", None,
+            reason="Model registry not initialised (server started with --no-ai or init failed).",
+        )
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+    pil_image = img
+    W, H = pil_image.size
+
+    # Eager-import adapter modules so their factories are registered.
+    # Safe even without [ai] — the modules don't import torch at module load.
+    try:
+        from annotate.models import grounding_dino  # noqa: F401
+    except ImportError:
+        pass
+
+    # Resolve and load the detector
+    try:
+        # scene_class lives on the file entry once Phase 5 routing lands;
+        # for now, pass it through if present.
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("detect", "detect",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_suggest_regions", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load detector: {e}")
+
+    # Decide prompts
+    use_prompts = list(prompts or [])
+    if not use_prompts and (broad_prompts or exclude_existing):
+        use_prompts = list(DEFAULT_BROAD_PROMPTS)
+    if not use_prompts:
+        return _text("No prompts provided. Pass prompts=[...] or broad_prompts=True.")
+
+    # Decide tiling
+    mode = tiling
+    tiles = None
+    notes: list[str] = []
+    if mode == "auto":
+        mode = auto_grid(W, H)
+    if mode == "adaptive":
+        tiles = _adaptive_tiles(pil_image, registry, notes)
+        if tiles is None:
+            mode = auto_grid(W, H)
+            notes.append(f"saliency unavailable; fell back to {mode}")
+    if tiles is None:
+        tiles = generate_tiles(W, H, mode)
+    cols, rows = parse_grid(mode if mode != "auto" else "none")
+
+    # Run detector per tile
+    all_candidates: list[CandidateBox] = []
+    for t in tiles:
+        crop = pil_image.crop((t.x, t.y, t.x + t.w, t.y + t.h)) if mode != "none" else pil_image
+        try:
+            tile_detections = adapter.detect(crop, use_prompts, min_confidence=min_confidence)
+        except Exception as e:
+            return _text(f"Detector raised on tile ({t.col},{t.row}): {e}")
+        for det in tile_detections:
+            # det.xy is fraction-of-tile in [2, x, y, w, h]; remap to image fraction
+            _, tx, ty, tw, th = det.xy
+            x_frac = (t.x + tx * t.w) / W
+            y_frac = (t.y + ty * t.h) / H
+            w_frac = (tw * t.w) / W
+            h_frac = (th * t.h) / H
+            all_candidates.append(CandidateBox(
+                x=x_frac, y=y_frac, w=w_frac, h=h_frac,
+                label=det.label, score=det.score, tile=(t.col, t.row),
+            ))
+
+    merged = nms_merge(all_candidates, iou_threshold=0.5, per_label=True)
+
+    if exclude_existing:
+        existing = _existing_boxes_fraction(project, image_registry_map, fid)
+        merged = filter_existing(merged, existing, iou_threshold=0.5)
+
+    response = {
+        "fid": fid,
+        "image_dims": [W, H],
+        "model": adapter.model_id,
+        "tile_grid": mode,
+        "tile_count": len(tiles),
+        "prompts": use_prompts,
+        "candidate_count": len(merged),
+        "candidates": [
+            {
+                "xy": c.to_xy(),
+                "label": c.label,
+                "score": round(c.score, 4),
+                "tile": list(c.tile) if c.tile else None,
+            }
+            for c in merged
+        ],
+        "notes": notes,
+    }
+
+    return _text(json.dumps(response, indent=2))
+
+
+def _adaptive_tiles(image, registry, notes: list):
+    """Try to build a saliency-driven tile set. Returns None on failure
+    (caller falls back to auto-grid)."""
+    from annotate.models import NotInstalledError
+    try:
+        from annotate.models import saliency as _saliency_mod  # noqa: F401
+    except ImportError:
+        return None
+    try:
+        adapter = registry.acquire("saliency", "saliency")
+    except NotInstalledError as e:
+        notes.append(f"saliency adapter unavailable: {e}")
+        return None
+    except Exception as e:
+        notes.append(f"saliency load failed: {e}")
+        return None
+    try:
+        sal_map = adapter.saliency(image)
+        tiles = _saliency_mod.cluster_to_tiles(sal_map, max_tiles=8)
+    except Exception as e:
+        notes.append(f"saliency clustering failed: {e}")
+        return None
+    if not tiles:
+        notes.append("saliency produced no clusters; using uniform grid")
+        return None
+    notes.append(f"adaptive tiling placed {len(tiles)} salience-focused tiles")
+    return tiles
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: via_tighten_region + via_grade_annotations
+# ---------------------------------------------------------------------------
+
+def handle_tighten_region(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    auto_apply: bool = False,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_tighten_region", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    region = project.get("metadata", {}).get(metadata_id)
+    if region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+
+    vid = region.get("vid")
+    fid = _resolve_fid_for_vid(project, vid) if vid else None
+    if fid is None:
+        return _text(f"Could not resolve fid for region {metadata_id!r}.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    xy = region.get("xy") or []
+    if not xy:
+        return _text(f"Region {metadata_id!r} has no xy.")
+    shape = xy[0]
+    coords = xy[1:]
+    bbox = _region_bbox_orig(int(shape) if isinstance(shape, (int, float)) else 0, coords)
+    if bbox is None:
+        return _text(f"Region {metadata_id!r} has unsupported shape {shape!r} for tightening.")
+    x0, y0, x1, y1 = bbox
+
+    # Eager-import segment adapters
+    try:
+        from annotate.models import sam2  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("segment", "segment",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_tighten_region", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load segmenter: {e}")
+
+    is_polygon_input = (int(shape) == 7) if isinstance(shape, (int, float)) else False
+
+    try:
+        mask = adapter.segment(img, box=(x0, y0, x1, y1),
+                               return_polygon=is_polygon_input)
+    except Exception as e:
+        return _text(f"Segmenter raised: {e}")
+
+    W, H = img.size
+    # Tightened bbox in original-pixel space for round-tripping
+    _, tx_f, ty_f, tw_f, th_f = mask.xy
+    tightened_pixel = [2, int(tx_f * W), int(ty_f * H), int(tw_f * W), int(th_f * H)]
+
+    applied = False
+    if auto_apply:
+        if is_polygon_input and mask.polygon_xy is not None:
+            # Convert fraction polygon to pixel polygon for storage
+            poly_pixel: list = [7]
+            pts = mask.polygon_xy[1:]
+            for i in range(0, len(pts) - 1, 2):
+                poly_pixel.append(int(pts[i] * W))
+                poly_pixel.append(int(pts[i + 1] * H))
+            project["metadata"][metadata_id]["xy"] = poly_pixel
+        else:
+            project["metadata"][metadata_id]["xy"] = tightened_pixel
+        store.set_project(project)
+        applied = True
+
+    response = {
+        "metadata_id": metadata_id,
+        "model": adapter.model_id,
+        "current_xy_pixel": list(xy),
+        "tightened_xy_pixel": tightened_pixel,
+        "tightened_xy_fraction": [round(v, 4) if isinstance(v, float) else v for v in mask.xy],
+        "iou_with_input": round(mask.iou_with_input, 4) if mask.iou_with_input is not None else None,
+        "mask_area_fraction": round(mask.area_fraction, 6) if mask.area_fraction is not None else None,
+        "auto_applied": applied,
+    }
+    if mask.polygon_xy is not None:
+        response["tightened_polygon_fraction"] = mask.polygon_xy
+    return _text(json.dumps(response, indent=2))
+
+
+def handle_grade_annotations(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    mids: list[str] | None = None,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_grade_annotations", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    view_to_fids = {
+        v: [str(x) for x in vd.get("fid_list", [])]
+        for v, vd in project.get("view", {}).items()
+    }
+    candidates: list[tuple[str, dict]] = []
+    for mid, m in project.get("metadata", {}).items():
+        if mids is not None and mid not in mids:
+            continue
+        if str(fid) not in view_to_fids.get(m.get("vid", ""), []):
+            continue
+        candidates.append((mid, m))
+
+    if not candidates:
+        return _text(json.dumps({
+            "fid": fid,
+            "regions": [],
+            "overall": {"flagged_count": 0, "graded_count": 0},
+            "notes": ["no regions on this fid match the filter"],
+        }, indent=2))
+
+    # Eager-import grader adapters
+    try:
+        from annotate.models import clip_grader  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("grade", "grade",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_grade_annotations", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load grader: {e}")
+
+    region_results: list[dict] = []
+    flagged = 0
+    pos_sum = size_sum = match_sum = 0.0
+    for mid, m in candidates:
+        label = (m.get("av") or {}).get("1", "")
+        if not label:
+            region_results.append({
+                "metadata_id": mid, "label": "", "skipped": "no label",
+            })
+            continue
+        try:
+            grade = adapter.grade(img, {**m, "_mid": mid}, label)
+        except Exception as e:
+            region_results.append({
+                "metadata_id": mid, "label": label, "error": str(e),
+            })
+            continue
+        is_flagged = (
+            grade.position < 0.7 or grade.size < 0.7
+            or grade.label_match < 0.5 or grade.shape_encoding_fit != "good"
+        )
+        if is_flagged:
+            flagged += 1
+        pos_sum += grade.position
+        size_sum += grade.size
+        match_sum += grade.label_match
+        region_results.append({
+            "metadata_id": mid,
+            "label": label,
+            "position": round(grade.position, 3),
+            "size": round(grade.size, 3),
+            "label_match": round(grade.label_match, 3),
+            "shape_encoding_fit": grade.shape_encoding_fit,
+            "issues": grade.issues,
+            "flagged": is_flagged,
+        })
+
+    n = max(1, sum(1 for r in region_results if "error" not in r and "skipped" not in r))
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "graded_count": n,
+        "overall": {
+            "mean_position": round(pos_sum / n, 3),
+            "mean_size": round(size_sum / n, 3),
+            "mean_label_match": round(match_sum / n, 3),
+            "flagged_count": flagged,
+        },
+        "regions": region_results,
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: via_verify_region
+# ---------------------------------------------------------------------------
+
+def handle_verify_region(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_verify_region", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    region = project.get("metadata", {}).get(metadata_id)
+    if region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+    label = (region.get("av") or {}).get("1", "")
+    if not label:
+        return _text(f"Region {metadata_id!r} has no label — nothing to verify.")
+
+    vid = region.get("vid")
+    fid = _resolve_fid_for_vid(project, vid) if vid else None
+    if fid is None:
+        return _text(f"Could not resolve fid for region {metadata_id!r}.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    xy = region.get("xy") or []
+    head = xy[0] if xy else 0
+    shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+    bbox = _region_bbox_orig(shape, xy[1:])
+    if bbox is None:
+        return _text(f"Region {metadata_id!r} has unsupported shape for verification.")
+    x0, y0, x1, y1 = bbox
+    # Clamp + minimum padding around the crop so the VLM has context
+    W, H = img.size
+    pad_x = max(8, int((x1 - x0) * 0.1))
+    pad_y = max(8, int((y1 - y0) * 0.1))
+    cx0 = max(0, int(x0) - pad_x)
+    cy0 = max(0, int(y0) - pad_y)
+    cx1 = min(W, int(x1) + pad_x)
+    cy1 = min(H, int(y1) + pad_y)
+    crop = img.crop((cx0, cy0, cx1, cy1))
+
+    try:
+        from annotate.models import chat_vlm  # noqa: F401  (registers Qwen/SmolVLM verify)
+        from annotate.models import florence2  # noqa: F401  (registers Florence-2 if configured)
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("verify", "verify",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_verify_region", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load verifier: {e}")
+
+    try:
+        verdict = adapter.verify(crop, label)
+    except Exception as e:
+        return _text(f"Verifier raised: {e}")
+
+    response = {
+        "metadata_id": metadata_id,
+        "model": adapter.model_id,
+        "label_claimed": verdict.label_claimed,
+        "verdict": verdict.verdict,
+        "confidence": round(verdict.confidence, 3),
+        "supporting": verdict.supporting,
+        "contradicting": verdict.contradicting,
+        "suggested_label": verdict.suggested_label,
+        "crop_window_pixel": [cx0, cy0, cx1 - cx0, cy1 - cy0],
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: scene classification + automatic routing
+# ---------------------------------------------------------------------------
+
+def handle_classify_scene(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    labels: list[str] | None = None,
+    cache: bool = True,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_classify_scene", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    # Eager-import classifier adapters (CLIP serves classify + grade).
+    try:
+        from annotate.models import clip_grader  # noqa: F401
+    except ImportError:
+        pass
+
+    cfg = registry.config.pipeline_for("classify", override=pipeline)
+    if cfg is None:
+        return _text("No classify pipeline configured.")
+    candidate_labels = labels or cfg.extra.get("labels") or []
+    if not candidate_labels:
+        return _text("No candidate labels: pass labels=[...] or add a labels= list under [classify.default] in models.toml.")
+
+    try:
+        adapter = registry.acquire("classify", "classify", pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_classify_scene", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load classifier: {e}")
+
+    try:
+        scores = adapter.classify(img, candidate_labels)
+    except Exception as e:
+        return _text(f"Classifier raised: {e}")
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_label, top_score = ranked[0]
+
+    cached = False
+    if cache:
+        # Persist on the file entry so subsequent detection/segment calls
+        # can route via registry.acquire(scene_class=...).
+        project["file"][str(fid)]["scene_class"] = top_label
+        project["file"][str(fid)]["scene_class_confidence"] = round(top_score, 4)
+        store.set_project(project)
+        cached = True
+
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "scene_class": top_label,
+        "confidence": round(top_score, 4),
+        "all_scores": {k: round(v, 4) for k, v in ranked},
+        "cached_on_file_entry": cached,
+        "routing_effect": _explain_routing(registry.config, top_label),
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+def _explain_routing(cfg, scene_class: str) -> dict:
+    """Surface which pipelines this scene class would route to."""
+    rules = cfg.routing.get(scene_class, {})
+    out = {}
+    for task in ("detect", "segment", "verify", "grade"):
+        chosen = rules.get(task, "default")
+        out[task] = f"{task}.{chosen}"
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: ask_model + find_similar
+# ---------------------------------------------------------------------------
+
+def handle_ask_model(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    question: str,
+    region_bbox: list | None = None,
+    xy_space: str = "fraction",
+    metadata_id: str | None = None,
+    max_new_tokens: int = 256,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    """Free-form Q&A about an image (or a region of one).
+
+    Either pass ``region_bbox=[x, y, w, h]`` (fraction or original-pixel
+    per ``xy_space``) or ``metadata_id=`` to use an existing region's
+    bbox. Omit both to ask about the full image.
+    """
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_ask_model", None,
+                                 reason="Model registry not initialised.")
+    if not question or not question.strip():
+        return _text("Pass a non-empty 'question'.")
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+    W, H = img.size
+
+    crop_window = None
+    if metadata_id is not None:
+        region = project.get("metadata", {}).get(metadata_id)
+        if region is None:
+            return _text(f"metadata_id {metadata_id!r} not found.")
+        xy = region.get("xy") or []
+        head = xy[0] if xy else 0
+        shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+        bbox = _region_bbox_orig(shape, xy[1:])
+        if bbox is None:
+            return _text(f"Region {metadata_id!r} has unsupported shape for crop.")
+        crop_window = bbox
+    elif region_bbox is not None:
+        if len(region_bbox) != 4:
+            return _text("region_bbox must be [x, y, w, h]")
+        x, y, w, h = region_bbox
+        if xy_space == "fraction":
+            x, w = x * W, w * W
+            y, h = y * H, h * H
+        elif xy_space != "original":
+            return _text(f"xy_space must be 'fraction' or 'original', got {xy_space!r}")
+        crop_window = (int(x), int(y), int(x + w), int(y + h))
+
+    if crop_window is not None:
+        x0, y0, x1, y1 = crop_window
+        pad_x = max(8, int((x1 - x0) * 0.1))
+        pad_y = max(8, int((y1 - y0) * 0.1))
+        cx0 = max(0, x0 - pad_x); cy0 = max(0, y0 - pad_y)
+        cx1 = min(W, x1 + pad_x); cy1 = min(H, y1 + pad_y)
+        target = img.crop((cx0, cy0, cx1, cy1))
+        used_window_pixel = [cx0, cy0, cx1 - cx0, cy1 - cy0]
+    else:
+        target = img
+        used_window_pixel = [0, 0, W, H]
+
+    try:
+        from annotate.models import chat_vlm  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("ask", "ask",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_ask_model", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load chat VLM: {e}")
+
+    try:
+        answer = adapter.ask(target, question, max_new_tokens=max_new_tokens)
+    except Exception as e:
+        return _text(f"Chat VLM raised: {e}")
+
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "question": answer.question,
+        "answer": answer.text,
+        "finish_reason": answer.finish_reason,
+        "tokens_generated": answer.tokens_generated,
+        "used_window_pixel": used_window_pixel,
+    }
+    if metadata_id:
+        response["metadata_id"] = metadata_id
+    return _text(json.dumps(response, indent=2))
+
+
+def handle_find_similar(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    target_fids: list[str] | None = None,
+    min_confidence: float = 0.3,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    """Use a labelled region as a visual prompt; return similar regions
+    from each target image. If ``target_fids`` is omitted, searches the
+    reference's own image."""
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_find_similar", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    ref_region = project.get("metadata", {}).get(metadata_id)
+    if ref_region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+    ref_vid = ref_region.get("vid")
+    ref_fid = _resolve_fid_for_vid(project, ref_vid) if ref_vid else None
+    if ref_fid is None:
+        return _text(f"Could not resolve fid for reference region {metadata_id!r}.")
+    ref_img, err = _open_image(project, image_registry_map, ref_fid)
+    if ref_img is None:
+        return _text(err)
+
+    xy = ref_region.get("xy") or []
+    head = xy[0] if xy else 0
+    shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+    ref_bbox = _region_bbox_orig(shape, xy[1:])
+    if ref_bbox is None:
+        return _text(f"Reference region {metadata_id!r} has unsupported shape.")
+
+    targets = target_fids if target_fids else [ref_fid]
+    # Resolve all target images up front
+    target_images = {}
+    for tfid in targets:
+        timg, terr = _open_image(project, image_registry_map, tfid)
+        if timg is None:
+            return _text(f"fid={tfid}: {terr}")
+        target_images[tfid] = timg
+
+    try:
+        from annotate.models import yoloe  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        adapter = registry.acquire("find_similar", "find_similar", pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_find_similar", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load find_similar adapter: {e}")
+
+    ref_label = (ref_region.get("av") or {}).get("1", "")
+    all_results = []
+    for tfid, timg in target_images.items():
+        try:
+            detections = adapter.find_similar(
+                timg, ref_img, ref_bbox, min_confidence=min_confidence,
+            )
+        except Exception as e:
+            return _text(f"find_similar raised on fid={tfid}: {e}")
+        all_results.append({
+            "fid": tfid,
+            "candidate_count": len(detections),
+            "candidates": [
+                {"xy": d.xy, "score": round(d.score, 4), "label": ref_label or d.label}
+                for d in detections
+            ],
+        })
+
+    response = {
+        "reference_mid": metadata_id,
+        "reference_label": ref_label,
+        "reference_fid": ref_fid,
+        "model": adapter.model_id,
+        "results": all_results,
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # main() and async MCP runner
 # ---------------------------------------------------------------------------
 
@@ -731,6 +1935,17 @@ def main():
         "--browser",
         action="store_true",
         help="Open browser on startup",
+    )
+    parser.add_argument(
+        "--models-config",
+        default=os.environ.get("ANNOTATE_MODELS_CONFIG"),
+        help="Path to models.toml (env: ANNOTATE_MODELS_CONFIG; "
+             "default: ~/.config/annotate/models.toml, auto-generated on first run)",
+    )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Skip building the model registry (AI tools return install hint)",
     )
     args = parser.parse_args()
 
@@ -812,10 +2027,25 @@ def main():
     if args.browser:
         webbrowser.open(annotator_url)
 
-    asyncio.run(_run_mcp(store, annotator_url, actual_port, image_registry))
+    registry = None
+    if not args.no_ai:
+        try:
+            from annotate.models import ModelRegistry, load_config
+            registry = ModelRegistry(load_config(args.models_config))
+            print(
+                f"annotate: model registry loaded "
+                f"({len(registry.config.pipelines)} pipelines from "
+                f"{registry.config.source_path or 'builtin defaults'})",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"annotate: model registry init failed ({e}); AI tools disabled", file=sys.stderr)
+            registry = None
+
+    asyncio.run(_run_mcp(store, annotator_url, actual_port, image_registry, registry))
 
 
-async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict) -> None:
+async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict, registry=None) -> None:
     mcp_server = mcp.server.Server("annotate")
 
     @mcp_server.list_tools()
@@ -844,8 +2074,23 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             ),
             types.Tool(
                 name="via_get_project",
-                description="Return the full VIA project JSON (files, views, metadata, attributes).",
-                inputSchema={"type": "object", "properties": {}, "required": []},
+                description=(
+                    "Return a summary of the VIA project: file list with per-file region "
+                    "counts, attribute schema, pid/rev. Pass full=true to get the raw "
+                    "project JSON (can be very large on multi-image projects — prefer "
+                    "via_get_annotations(vid=...) for reading regions)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "full": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Return the full raw project JSON (default: summary only)",
+                        },
+                    },
+                    "required": [],
+                },
             ),
             types.Tool(
                 name="via_list_files",
@@ -855,21 +2100,22 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             types.Tool(
                 name="via_get_annotations",
                 description=(
-                    "Return all annotation metadata, optionally filtered by view ID. "
-                    "format='pixel' (default) returns coords in original pixel space; "
-                    "'fraction' returns coords as 0–1 fractions of the original dims "
-                    "(useful for diffing your placements against user corrections "
-                    "without manual arithmetic); 'both' returns pixels plus an extra "
-                    "xy_fraction field per region."
+                    "Return annotation metadata. Without vid: returns a per-file summary "
+                    "(region counts + label lists) — lightweight for orientation. "
+                    "Pass vid=<vid> to get full annotations for that view. "
+                    "format='fraction' (default) returns coords as 0–1 fractions — "
+                    "preferred for all read-back and diffing; 'pixel' for raw original-"
+                    "space coords; 'both' adds an xy_fraction field alongside pixel xy."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "vid": {"type": "string", "description": "View ID to filter by (omit for all)"},
+                        "vid": {"type": "string", "description": "View ID (omit for per-file summary)"},
                         "format": {
                             "type": "string",
                             "enum": ["pixel", "fraction", "both"],
-                            "default": "pixel",
+                            "default": "fraction",
+                            "description": "Coordinate format for full-view reads (ignored for summary)",
                         },
                     },
                     "required": [],
@@ -880,8 +2126,9 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 description=(
                     "Add one annotation region. xy encoding: rectangle=[2,x,y,w,h], "
                     "point=[1,x,y], circle=[3,cx,cy,r], polygon=[7,x1,y1,x2,y2,...]. "
-                    "Coordinates default to original pixel space; pass xy_space='fraction' "
-                    "to use 0.0–1.0 values that the server scales by the original image dims. "
+                    "Default xy_space='fraction': pass 0.0–1.0 values the server scales "
+                    "by the original image dims — lower error rate than pixel arithmetic. "
+                    "Use xy_space='original' only when you already have pixel coordinates. "
                     "av keys may be attribute IDs ('1','2',...) or anames ('label','description'); "
                     "unknown keys are rejected (use via_get_project to see the schema)."
                 ),
@@ -894,9 +2141,9 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "av": {"type": "object", "description": "Attribute key-value pairs (strings)", "additionalProperties": {"type": "string"}},
                         "xy_space": {
                             "type": "string",
-                            "enum": ["original", "fraction"],
-                            "description": "'original' = pixel coords (default); 'fraction' = 0.0–1.0 of original dims",
-                            "default": "original",
+                            "enum": ["fraction", "original"],
+                            "description": "'fraction' (default) — coords are 0.0–1.0 of the original dims, server scales for you. Lower error rate than pixel arithmetic. 'original' — coords in original pixel space.",
+                            "default": "fraction",
                         },
                     },
                     "required": ["vid", "z", "xy", "av"],
@@ -917,8 +2164,8 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "av": {"type": "object", "additionalProperties": {"type": "string"}},
                         "xy_space": {
                             "type": "string",
-                            "enum": ["original", "fraction"],
-                            "default": "original",
+                            "enum": ["fraction", "original"],
+                            "default": "fraction",
                         },
                     },
                     "required": ["metadata_id", "z", "xy", "av"],
@@ -1000,6 +2247,92 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_load_document",
+                description=(
+                    "Load a multi-page document (PDF) as one file entry "
+                    "per page. Each page is rasterised once to JPEG and "
+                    "cached; subsequent loads reuse the cache. File "
+                    "entries carry source_pdf + source_pdf_page fields "
+                    "for traceability. pages='all' (default), a single "
+                    "int (0-based), or a list of ints to load specific "
+                    "pages. Requires the [io] extra and poppler-utils "
+                    "on PATH."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to the PDF"},
+                        "pages": {
+                            "oneOf": [
+                                {"type": "string", "enum": ["all"]},
+                                {"type": "integer"},
+                                {"type": "array", "items": {"type": "integer"}},
+                            ],
+                            "default": "all",
+                            "description": "0-based page indices to load",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            types.Tool(
+                name="via_run_ocr",
+                description=(
+                    "Tesseract OCR over a file (or a region). Returns "
+                    "word-level boxes in the same candidate shape as "
+                    "via_suggest_regions — review and accept via "
+                    "via_add_region. Pass lang='eng+spa' for multi-"
+                    "language; min_confidence is on Tesseract's 0-100 "
+                    "scale (default 60). Optional region_bbox=[x,y,w,h] "
+                    "(fraction by default) limits OCR to that area. "
+                    "Requires the [ocr] extra and the tesseract CLI on "
+                    "PATH."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "lang": {
+                            "type": "string", "default": "eng",
+                            "description": "Tesseract language code(s), e.g. 'eng', 'eng+spa'",
+                        },
+                        "min_confidence": {
+                            "type": "integer", "default": 60,
+                            "description": "Drop words below this 0-100 confidence",
+                        },
+                        "region_bbox": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 4, "maxItems": 4,
+                            "description": "[x, y, w, h] limits OCR to a sub-region",
+                        },
+                        "xy_space": {
+                            "type": "string", "enum": ["fraction", "original"],
+                            "default": "fraction",
+                        },
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
+                name="via_read_metadata",
+                description=(
+                    "Read EXIF / XMP / IPTC metadata from an image: capture "
+                    "time, GPS, camera, lens, exposure, orientation, dims. "
+                    "Prefers the `exiftool` CLI (full coverage) when "
+                    "available on PATH; falls back to Pillow's built-in EXIF "
+                    "reader. Useful at session start to ground priors — a "
+                    "capture timestamp + GPS can prevent a whole class of "
+                    "lighting / season / location prior failures."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
                 name="via_save_project",
                 description="Write the current project JSON to a file on disk. Use when the user asks to save or export their work.",
                 inputSchema={
@@ -1008,6 +2341,214 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "path": {"type": "string", "description": "Absolute path to write, e.g. /home/user/project.json"},
                     },
                     "required": ["path"],
+                },
+            ),
+            # --- Local-model assistance (Phase 1 stubs; adapters land in 2-4) ---
+            types.Tool(
+                name="via_model_status",
+                description=(
+                    "Report the local-model assistance state: whether the [ai] "
+                    "extra is installed, which model pipelines are configured, "
+                    "which are currently loaded in memory, and the registered "
+                    "adapter prefixes."
+                ),
+                inputSchema={"type": "object", "properties": {}, "required": []},
+            ),
+            types.Tool(
+                name="via_capabilities",
+                description=(
+                    "Return the complete environment inventory: server version, which "
+                    "optional extras are installed ([ai], [io], [ocr], [yolo], [chat]), "
+                    "which system binaries are on PATH (exiftool, tesseract, poppler), "
+                    "configured AI pipelines, and current project state. "
+                    "Call once at session start to fill .training/ file frontmatter "
+                    "and to know which tools are actually usable."
+                ),
+                inputSchema={"type": "object", "properties": {}, "required": []},
+            ),
+            types.Tool(
+                name="via_suggest_regions",
+                description=(
+                    "[Phase 2] Open-vocabulary detection: given text prompts, "
+                    "return candidate regions with confidences. With "
+                    "exclude_existing=True, subtracts anything already covered "
+                    "by current annotations (find-missing mode). Tiling modes: "
+                    "none | 2x2 | 4x4 | 8x8 | auto | adaptive. Returns "
+                    "candidates only — nothing is written to the project."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "prompts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Text prompts; omit/empty + broad_prompts=True uses default broad set",
+                        },
+                        "tiling": {
+                            "type": "string",
+                            "enum": ["none", "2x2", "4x4", "8x8", "16x16", "auto", "adaptive"],
+                            "default": "auto",
+                        },
+                        "exclude_existing": {"type": "boolean", "default": False},
+                        "broad_prompts": {"type": "boolean", "default": False},
+                        "min_confidence": {"type": "number", "default": 0.3},
+                        "pipeline": {"type": "string", "description": "Override the default pipeline"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
+                name="via_tighten_region",
+                description=(
+                    "[Phase 3] Use SAM-style promptable segmentation to tighten "
+                    "an existing region's box (or polygon) to the actual object outline. "
+                    "Rectangle input: returns tightened bbox + IoU. "
+                    "Polygon input: also returns tightened_polygon_fraction — a "
+                    "SAM-mask contour in [7, x1, y1, ...] fraction encoding — and "
+                    "auto_apply=True writes the polygon, not the bbox. "
+                    "Does not write unless auto_apply=True."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {"type": "string"},
+                        "auto_apply": {"type": "boolean", "default": False},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
+                name="via_verify_region",
+                description=(
+                    "[Phase 4] Crop-and-verify with a VLM. Asks 'is this a "
+                    "{label}? what supports / contradicts that?' and returns a "
+                    "structured verdict with confidence, supporting features, "
+                    "contradicting features, and a suggested re-label if the "
+                    "model disagrees."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {"type": "string"},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
+                name="via_classify_scene",
+                description=(
+                    "[Phase 5] Run zero-shot scene classification on the image. "
+                    "Returns the top scene class (e.g. dense_crowd, painting, "
+                    "aerial_or_satellite) plus all candidate scores. With "
+                    "cache=True (default), the result is persisted on the file "
+                    "entry as scene_class, so subsequent detection / segment / "
+                    "grade / verify calls automatically route to the pipeline "
+                    "mapped under [routing] in models.toml."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "labels": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Override the default label set from models.toml",
+                        },
+                        "cache": {"type": "boolean", "default": True},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
+                name="via_ask_model",
+                description=(
+                    "[Phase 6] Ask a local chat VLM a free-form question "
+                    "about an image (or a specific region). Use for things "
+                    "structured tools don't cover: 'how many people are "
+                    "wearing red?', 'what's the make of this car?', 'read "
+                    "the text on this label', 'describe the lighting'. "
+                    "Pass region_bbox=[x,y,w,h] (defaults to fraction "
+                    "space) OR metadata_id=<mid> to crop to a region; "
+                    "omit both to ask about the full image. Default model: "
+                    "Qwen2.5-VL-3B (Apache 2.0)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "question": {"type": "string"},
+                        "region_bbox": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 4, "maxItems": 4,
+                            "description": "[x, y, w, h] in xy_space coords",
+                        },
+                        "xy_space": {
+                            "type": "string", "enum": ["fraction", "original"],
+                            "default": "fraction",
+                        },
+                        "metadata_id": {
+                            "type": "string",
+                            "description": "Use an existing region's bbox as the crop",
+                        },
+                        "max_new_tokens": {"type": "integer", "default": 256},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid", "question"],
+                },
+            ),
+            types.Tool(
+                name="via_find_similar",
+                description=(
+                    "[Phase 6] Use one annotated region as a visual prompt "
+                    "and find similar regions in the same image or across "
+                    "other images in the project. The killer feature for "
+                    "dense scenes: annotate one ice skater, find all of "
+                    "them. Requires the YOLOE pipeline (AGPL-3.0) to be "
+                    "configured under [find_similar.default] in "
+                    "models.toml — see the design doc for the license "
+                    "note."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {
+                            "type": "string",
+                            "description": "Reference region whose visual content drives the search",
+                        },
+                        "target_fids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Files to search (omit = just the reference's own image)",
+                        },
+                        "min_confidence": {"type": "number", "default": 0.3},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
+                name="via_grade_annotations",
+                description=(
+                    "[Phase 3] Score every region (or a specified subset) on "
+                    "position accuracy, size/extent, label-content match, and "
+                    "shape-encoding choice. Returns per-region scores plus "
+                    "issue notes; flagged regions are surfaced for review. "
+                    "Does not modify the project."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "mids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Region IDs to grade (omit for all on the file)",
+                        },
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid"],
                 },
             ),
         ]
@@ -1021,14 +2562,14 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             if name == "via_get_annotator_url":
                 return _text(annotator_url)
             if name == "via_get_project":
-                return handle_get_project(store)
+                return handle_get_project(store, full=bool(arguments.get("full", False)))
             if name == "via_list_files":
                 return handle_list_files(store)
             if name == "via_get_annotations":
                 return handle_get_annotations(
                     store, image_registry,
                     vid=arguments.get("vid"),
-                    format=arguments.get("format", "pixel"),
+                    format=arguments.get("format", "fraction"),
                 )
             if name == "via_add_region":
                 return handle_add_region(
@@ -1037,7 +2578,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
-                    xy_space=arguments.get("xy_space", "original"),
+                    xy_space=arguments.get("xy_space", "fraction"),
                 )
             if name == "via_update_region":
                 return handle_update_region(
@@ -1046,7 +2587,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
-                    xy_space=arguments.get("xy_space", "original"),
+                    xy_space=arguments.get("xy_space", "fraction"),
                 )
             if name == "via_delete_region":
                 return handle_delete_region(store, metadata_id=arguments["metadata_id"])
@@ -1070,6 +2611,85 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_save_project":
                 return handle_save_project(store, path=arguments["path"])
+            if name == "via_load_document":
+                return handle_load_document(
+                    store, image_registry, port,
+                    path=arguments["path"],
+                    pages=arguments.get("pages", "all"),
+                )
+            if name == "via_read_metadata":
+                return handle_read_metadata(store, image_registry, fid=arguments["fid"])
+            if name == "via_run_ocr":
+                return handle_run_ocr(
+                    store, image_registry,
+                    fid=arguments["fid"],
+                    lang=arguments.get("lang", "eng"),
+                    min_confidence=int(arguments.get("min_confidence", 60)),
+                    region_bbox=arguments.get("region_bbox"),
+                    xy_space=arguments.get("xy_space", "fraction"),
+                )
+            if name == "via_model_status":
+                return handle_model_status(registry)
+            if name == "via_capabilities":
+                return handle_capabilities(store, registry)
+            if name == "via_suggest_regions":
+                return handle_suggest_regions(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    prompts=arguments.get("prompts"),
+                    tiling=arguments.get("tiling", "auto"),
+                    exclude_existing=bool(arguments.get("exclude_existing", False)),
+                    broad_prompts=bool(arguments.get("broad_prompts", False)),
+                    min_confidence=float(arguments.get("min_confidence", 0.3)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_tighten_region":
+                return handle_tighten_region(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    auto_apply=bool(arguments.get("auto_apply", False)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_grade_annotations":
+                return handle_grade_annotations(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    mids=arguments.get("mids"),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_verify_region":
+                return handle_verify_region(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_classify_scene":
+                return handle_classify_scene(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    labels=arguments.get("labels"),
+                    cache=bool(arguments.get("cache", True)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_ask_model":
+                return handle_ask_model(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    question=arguments["question"],
+                    region_bbox=arguments.get("region_bbox"),
+                    xy_space=arguments.get("xy_space", "fraction"),
+                    metadata_id=arguments.get("metadata_id"),
+                    max_new_tokens=int(arguments.get("max_new_tokens", 256)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_find_similar":
+                return handle_find_similar(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    target_fids=arguments.get("target_fids"),
+                    min_confidence=float(arguments.get("min_confidence", 0.3)),
+                    pipeline=arguments.get("pipeline"),
+                )
             return _text(f"Unknown tool: {name}")
         except KeyError as e:
             return _text(f"Missing required argument: {e}")

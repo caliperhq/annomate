@@ -59,10 +59,28 @@ def test_get_project_no_project(store):
 
 
 def test_get_project_returns_json(loaded_store):
-    result = handle_get_project(loaded_store)
+    result = handle_get_project(loaded_store, full=True)
     data = json.loads(_text(result))
     assert "file" in data
     assert "metadata" in data
+
+
+def test_get_project_default_returns_summary(loaded_store):
+    result = handle_get_project(loaded_store)
+    data = json.loads(_text(result))
+    assert "file_count" in data
+    assert "region_count" in data
+    assert "files" in data
+    assert "attributes" in data
+    assert "note" in data
+    assert "metadata" not in data
+
+
+def test_get_project_full_returns_raw_json(loaded_store):
+    result = handle_get_project(loaded_store, full=True)
+    data = json.loads(_text(result))
+    assert "metadata" in data
+    assert "file" in data
 
 
 # --- via_list_files ---
@@ -89,13 +107,23 @@ def test_get_annotations_no_project(store):
 
 
 def test_get_annotations_returns_all(loaded_store):
-    result = handle_get_annotations(loaded_store, {}, vid=None)
+    # vid=None returns summary; use vid="1" for full annotations
+    result = handle_get_annotations(loaded_store, {}, vid="1", format="pixel")
     data = json.loads(_text(result))
     assert "abc12345" in data
 
 
+def test_get_annotations_no_vid_returns_summary(loaded_store):
+    result = handle_get_annotations(loaded_store, {}, vid=None)
+    data = json.loads(_text(result))
+    assert "total_regions" in data
+    assert "files" in data
+    assert "note" in data
+    assert "abc12345" not in data
+
+
 def test_get_annotations_filtered_by_vid(loaded_store):
-    result = handle_get_annotations(loaded_store, {}, vid="2")
+    result = handle_get_annotations(loaded_store, {}, vid="2", format="pixel")
     data = json.loads(_text(result))
     assert "abc12345" not in data  # belongs to vid="1"
     assert data == {}
@@ -116,7 +144,7 @@ def test_get_annotations_fraction_format(store, tmp_path):
     handle_add_region(store, registry, vid="1", z=[],
                       xy=[2, 1000, 500, 200, 400], av={"label": "r"})
 
-    result = handle_get_annotations(store, registry, vid=None, format="fraction")
+    result = handle_get_annotations(store, registry, vid="1", format="fraction")
     data = json.loads(_text(result))
     [region] = data.values()
     xy = region["xy"]
@@ -138,12 +166,19 @@ def test_get_annotations_both_format(store, tmp_path):
     handle_add_region(store, registry, vid="1", z=[],
                       xy=[2, 1000, 500, 200, 400], av={"label": "r"})
 
-    result = handle_get_annotations(store, registry, vid=None, format="both")
+    result = handle_get_annotations(store, registry, vid="1", format="both")
     data = json.loads(_text(result))
     [region] = data.values()
     assert region["xy"] == [2, 1000, 500, 200, 400]
     assert region["xy_fraction"][1] == pytest.approx(0.25)
     assert region["dims"] == [4000, 2000]
+
+
+def test_get_annotations_with_vid_returns_full(loaded_store):
+    result = handle_get_annotations(loaded_store, {}, vid="1", format="pixel")
+    data = json.loads(_text(result))
+    assert "abc12345" in data
+    assert data["abc12345"]["vid"] == "1"
 
 
 # --- via_add_region ---
@@ -653,6 +688,779 @@ def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
     assert len(result[1].data) > 0
 
 
+# --- Phase 2: via_suggest_regions with a mock detector adapter ---
+
+
+class _FakeDetector:
+    """Stand-in for a real adapter so the handler can be exercised without
+    torch installed. Returns a fixed set of detections regardless of prompts."""
+
+    model_id = "test/fake-detector"
+    capabilities = ("detect",)
+
+    def __init__(self, detections):
+        from annotate.models.base import Detection
+        self._detections = [Detection(**d) for d in detections]
+
+    def detect(self, image, prompts, **kwargs):
+        return list(self._detections)
+
+
+def _build_registry_with_fake(detections):
+    """Return a ModelRegistry whose acquire('detect','detect') yields _FakeDetector."""
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    fake = _FakeDetector(detections)
+    # Bypass the construct/load path — drop the fake straight into the cache
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg._loaded["detect.default"] = _LoadedEntry(fake, time.monotonic())
+    return reg
+
+
+def test_suggest_regions_no_project(store):
+    from annotate.server import handle_suggest_regions
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_suggest_regions(store, {}, reg, fid="1", prompts=["x"])
+    assert "No project" in _text(result)
+
+
+def test_suggest_regions_no_registry_returns_stub(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    result = handle_suggest_regions(store, registry, None, fid="1", prompts=["x"])
+    data = json.loads(_text(result))
+    assert data["available"] is False
+
+
+def test_suggest_regions_tiles_and_returns_candidates(store, tmp_path):
+    """Happy path with a mock detector: the handler should crop tiles,
+    call the detector per tile, map back to image fraction space, and
+    return merged candidates."""
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    # Detector returns one box centred on its tile, in fraction-of-tile
+    # coords. The handler should remap to fraction-of-image and dedupe via NMS.
+    reg = _build_registry_with_fake([
+        {"xy": [2, 0.25, 0.25, 0.5, 0.5], "label": "thing", "score": 0.9}
+    ])
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=["thing"], tiling="2x2",
+    )
+    data = json.loads(_text(result))
+    assert data["tile_grid"] == "2x2"
+    assert data["tile_count"] == 4
+    assert data["model"] == "test/fake-detector"
+    # 4 tiles × 1 box each → at least 1 candidate after NMS merge
+    assert data["candidate_count"] >= 1
+    for cand in data["candidates"]:
+        assert 0.0 <= cand["xy"][1] <= 1.0
+        assert cand["label"] == "thing"
+
+
+def test_suggest_regions_exclude_existing_filters_overlaps(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Pre-existing annotation covering the central region in original-pixel coords
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 200, 200, 600, 600], av={"label": "existing"})
+    reg = _build_registry_with_fake([
+        {"xy": [2, 0.2, 0.2, 0.6, 0.6], "label": "thing", "score": 0.9}
+    ])
+    # With exclude_existing, the detector's box (which is the same region)
+    # should be filtered out.
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=["thing"], tiling="none", exclude_existing=True,
+    )
+    data = json.loads(_text(result))
+    assert data["candidate_count"] == 0
+
+
+def test_suggest_regions_broad_prompts_uses_default_set(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.models.tiling import DEFAULT_BROAD_PROMPTS
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _build_registry_with_fake([])
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=None, tiling="none", broad_prompts=True,
+    )
+    data = json.loads(_text(result))
+    assert data["prompts"] == DEFAULT_BROAD_PROMPTS
+
+
+# --- Phase 3: via_tighten_region + via_grade_annotations with mocks ---
+
+
+class _FakeSegmenter:
+    model_id = "test/fake-segmenter"
+    capabilities = ("segment",)
+
+    def __init__(self, return_xy_fraction, iou=0.85, area_fraction=0.02):
+        from annotate.models.base import Mask
+        self._result = Mask(
+            xy=return_xy_fraction,
+            iou_with_input=iou,
+            area_fraction=area_fraction,
+            raster=None,
+        )
+
+    def segment(self, image, **kwargs):
+        return self._result
+
+
+class _FakeGrader:
+    model_id = "test/fake-grader"
+    capabilities = ("grade",)
+
+    def __init__(self, position=0.8, size=0.7, label_match=0.65, fit="good"):
+        self._kw = dict(position=position, size=size, label_match=label_match, fit=fit)
+
+    def grade(self, image, region, label):
+        from annotate.models.base import Grade
+        return Grade(
+            mid=region.get("_mid", ""),
+            label=label,
+            position=self._kw["position"],
+            size=self._kw["size"],
+            label_match=self._kw["label_match"],
+            shape_encoding_fit=self._kw["fit"],
+            issues=["mock issue"] if self._kw["fit"] != "good" else [],
+        )
+
+
+def _registry_with_pipeline(adapter, pipeline_key="segment.default"):
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    reg._loaded[pipeline_key] = _LoadedEntry(adapter, time.monotonic())
+    return reg
+
+
+def test_tighten_region_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.1, 0.1, 0.2, 0.2]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_tighten_region_returns_tightened_box_without_writing(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    # Segmenter returns a tighter box at 20%-30% in fraction coords
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["auto_applied"] is False
+    assert data["tightened_xy_pixel"] == [2, 200, 200, 300, 300]
+    # Region in the store should be unchanged
+    project = store.get()
+    assert project["metadata"][mid]["xy"] == [2, 100, 100, 400, 400]
+
+
+def test_tighten_region_auto_apply_writes_back(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    handle_tighten_region(store, registry_map, reg, metadata_id=mid, auto_apply=True)
+    project = store.get()
+    assert project["metadata"][mid]["xy"] == [2, 200, 200, 300, 300]
+
+
+class _FakeSegmenterWithPolygon:
+    model_id = "test/fake-segmenter-poly"
+    capabilities = ("segment",)
+
+    def __init__(self):
+        from annotate.models.base import Mask
+        self._result = Mask(
+            xy=[2, 0.2, 0.2, 0.3, 0.3],
+            iou_with_input=0.72,
+            area_fraction=0.06,
+            raster=None,
+            polygon_xy=[7, 0.2, 0.2, 0.5, 0.2, 0.35, 0.5],
+        )
+
+    def segment(self, image, **kwargs):
+        return self._result
+
+
+def test_tighten_region_polygon_input_returns_polygon_output(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[7, 100, 100, 500, 100, 350, 500],
+                            av={"label": "shape"}, xy_space="original")
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenterWithPolygon())
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+
+    assert "tightened_polygon_fraction" in data
+    poly = data["tightened_polygon_fraction"]
+    assert poly[0] == 7
+    assert len(poly) >= 7  # shape_id + at least 3 pairs
+
+
+def test_tighten_region_polygon_auto_apply_writes_polygon(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[7, 100, 100, 500, 100, 350, 500],
+                            av={"label": "shape"}, xy_space="original")
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenterWithPolygon())
+    handle_tighten_region(store, registry_map, reg, metadata_id=mid, auto_apply=True)
+
+    project = store.get()
+    stored_xy = project["metadata"][mid]["xy"]
+    assert stored_xy[0] == 7
+
+
+def test_tighten_region_bbox_input_unchanged_behaviour(store, tmp_path):
+    """Existing bbox tighten behaviour is unaffected when adapter has no polygon."""
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+
+    assert "tightened_polygon_fraction" not in data
+    assert data["tightened_xy_pixel"] == [2, 200, 200, 300, 300]
+
+
+def test_grade_annotations_empty_fid_returns_empty_set(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_grade_annotations
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _registry_with_pipeline(_FakeGrader(), pipeline_key="grade.default")
+    result = handle_grade_annotations(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["regions"] == []
+    assert data["overall"]["flagged_count"] == 0
+
+
+def test_grade_annotations_scores_each_region(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_grade_annotations
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 100, 100, 200, 200], av={"label": "cat"})
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 500, 500, 200, 200], av={"label": "dog"})
+    # A grader that fails: position=0.3 → should be flagged
+    reg = _registry_with_pipeline(_FakeGrader(position=0.3, size=0.4, label_match=0.4,
+                                              fit="marginal"),
+                                   pipeline_key="grade.default")
+    result = handle_grade_annotations(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["graded_count"] == 2
+    assert data["overall"]["flagged_count"] == 2
+    for r in data["regions"]:
+        assert r["flagged"] is True
+        assert "mock issue" in r["issues"]
+
+
+# --- Phase 6: via_ask_model + via_find_similar ---
+
+
+class _FakeAsker:
+    model_id = "test/fake-asker"
+    capabilities = ("ask",)
+
+    def __init__(self, answer_text="It is a cat."):
+        self._text = answer_text
+        self._last_question = None
+        self._last_image_size = None
+
+    def ask(self, image, question, **kwargs):
+        from annotate.models.base import Answer
+        self._last_question = question
+        self._last_image_size = image.size
+        return Answer(question=question, text=self._text,
+                      finish_reason="stop", tokens_generated=len(self._text.split()))
+
+
+class _FakeSimilarityFinder:
+    model_id = "test/fake-yoloe"
+    capabilities = ("find_similar",)
+
+    def __init__(self, detections_per_target=None):
+        self._dets = detections_per_target or []
+
+    def find_similar(self, target_image, reference_image, reference_box_pixel, **kwargs):
+        from annotate.models.base import Detection
+        return [Detection(**d) for d in self._dets]
+
+
+def _reg_with_adapter(pipeline_key, adapter):
+    """Build a registry with a fake adapter pre-cached AND a matching
+    config entry so acquire() resolves successfully."""
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.config import PipelineConfig
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    task, name = pipeline_key.split(".", 1)
+    # Ensure a pipeline config exists for the key (some defaults like
+    # find_similar.default are commented out in the embedded TOML).
+    if pipeline_key not in reg.config.pipelines:
+        reg.config.pipelines[pipeline_key] = PipelineConfig(
+            task=task, name=name, model="test/mock", device="cpu",
+        )
+    reg._loaded[pipeline_key] = _LoadedEntry(adapter, time.monotonic())
+    return reg
+
+
+def test_ask_model_empty_question_errors(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _reg_with_adapter("ask.default", _FakeAsker())
+    result = handle_ask_model(store, registry_map, reg, fid="1", question="  ")
+    assert "non-empty" in _text(result)
+
+
+def test_ask_model_full_image(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 300), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    asker = _FakeAsker(answer_text="There is a small dark image.")
+    reg = _reg_with_adapter("ask.default", asker)
+    result = handle_ask_model(store, registry_map, reg, fid="1",
+                              question="What's in this image?")
+    data = json.loads(_text(result))
+    assert data["answer"] == "There is a small dark image."
+    assert data["used_window_pixel"] == [0, 0, 400, 300]
+    assert asker._last_image_size == (400, 300)
+
+
+def test_ask_model_with_region_bbox_crops(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    asker = _FakeAsker()
+    reg = _reg_with_adapter("ask.default", asker)
+    handle_ask_model(store, registry_map, reg, fid="1",
+                     question="What is this?",
+                     region_bbox=[0.2, 0.2, 0.4, 0.4])
+    # 0.2..0.6 of 1000 = 200..600, padded by 10% of 400 → 40, so 160..640 = 480 wide
+    assert asker._last_image_size == (480, 480)
+
+
+def test_ask_model_with_metadata_id(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 200, 200], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+    asker = _FakeAsker(answer_text="It's a thing.")
+    reg = _reg_with_adapter("ask.default", asker)
+    result = handle_ask_model(store, registry_map, reg, fid="1",
+                              question="What is it?", metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["metadata_id"] == mid
+    assert data["answer"] == "It's a thing."
+
+
+def test_find_similar_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_find_similar
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _reg_with_adapter("find_similar.default", _FakeSimilarityFinder())
+    result = handle_find_similar(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_find_similar_returns_per_target_results(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_find_similar
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 200, 200], av={"label": "ice skater"})
+    mid = json.loads(_text(add))["metadata_id"]
+    finder = _FakeSimilarityFinder([
+        {"xy": [2, 0.4, 0.4, 0.05, 0.05], "label": "x", "score": 0.85},
+        {"xy": [2, 0.6, 0.3, 0.05, 0.05], "label": "x", "score": 0.7},
+    ])
+    reg = _reg_with_adapter("find_similar.default", finder)
+    result = handle_find_similar(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["reference_label"] == "ice skater"
+    assert len(data["results"]) == 1
+    assert data["results"][0]["candidate_count"] == 2
+    # Reference label should be propagated onto similar candidates
+    for c in data["results"][0]["candidates"]:
+        assert c["label"] == "ice skater"
+
+
+# --- Phase 5: scene classifier, routing, adaptive tiling ---
+
+
+class _FakeClassifier:
+    model_id = "test/fake-classifier"
+    capabilities = ("classify",)
+
+    def __init__(self, scores):
+        self._scores = scores  # dict[str, float]
+
+    def classify(self, image, candidate_labels):
+        return {lab: self._scores.get(lab, 0.0) for lab in candidate_labels}
+
+
+def test_classify_scene_persists_top_label(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_classify_scene
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    fake = _FakeClassifier({"dense_crowd": 0.7, "painting": 0.2, "landscape": 0.1})
+    reg = ModelRegistry(default_config())
+    reg._loaded["classify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_classify_scene(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["scene_class"] == "dense_crowd"
+    assert data["cached_on_file_entry"] is True
+    # Persisted on the file entry
+    file_entry = store.get()["file"]["1"]
+    assert file_entry["scene_class"] == "dense_crowd"
+    assert file_entry["scene_class_confidence"] == pytest.approx(0.7, abs=1e-4)
+    # Routing effect uses the default routing in the embedded config
+    assert data["routing_effect"]["detect"] == "detect.dense_scene"
+
+
+def test_classify_scene_no_labels_errors(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_classify_scene
+    from annotate.models.config import _parse
+    from annotate.models import ModelRegistry
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Build a registry whose classify.default has NO labels
+    cfg = _parse(tomllib.loads('[classify.default]\nmodel = "x/y"\n'))
+    reg = ModelRegistry(cfg)
+    result = handle_classify_scene(store, registry_map, reg, fid="1")
+    assert "No candidate labels" in _text(result)
+
+
+def test_routing_passes_scene_class_to_detector(store, tmp_path):
+    """End-to-end routing: a file with scene_class='dense_crowd' should
+    cause the detect handler to ask for pipeline 'dense_scene' (not 'default').
+    """
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    from annotate.models import ModelRegistry, default_config
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    project = store.get()
+    project["file"]["1"]["scene_class"] = "dense_crowd"
+    store.set_project(project)
+
+    # Track which pipeline acquire() was asked for.
+    seen = {}
+    reg = ModelRegistry(default_config())
+    original = reg.acquire
+    def spy(task, capability, **kw):
+        seen["scene_class"] = kw.get("scene_class")
+        seen["pipeline"] = kw.get("pipeline")
+        raise NotImplementedError("stop here — we only care about how we were called")
+    reg.acquire = spy
+    handle_suggest_regions(store, registry_map, reg, fid="1", prompts=["x"])
+    assert seen["scene_class"] == "dense_crowd"
+    assert seen["pipeline"] is None  # routing happens inside config.pipeline_for
+
+
+# --- saliency clustering (no torch needed; cv2 is required, skip if missing) ---
+
+def test_cluster_to_tiles_groups_bright_blobs():
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from annotate.models.saliency import cluster_to_tiles
+
+    # Build a 200×200 saliency map with two bright squares
+    sal = np.zeros((200, 200), dtype="uint8")
+    sal[20:60, 20:60] = 220       # blob A
+    sal[120:170, 100:170] = 200   # blob B
+    tiles = cluster_to_tiles(sal, threshold=0.4, max_tiles=8, min_area_fraction=0.001)
+    assert len(tiles) == 2
+    # Larger blob (B = 50*70=3500) should be first; A = 40*40=1600
+    assert tiles[0].w * tiles[0].h >= tiles[1].w * tiles[1].h
+
+
+def test_cluster_to_tiles_caps_max_tiles():
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from annotate.models.saliency import cluster_to_tiles
+
+    sal = np.zeros((200, 200), dtype="uint8")
+    # Plant 12 distinct blobs
+    coords = [(i * 15, j * 15) for i in range(4) for j in range(3)]
+    for x, y in coords:
+        sal[y:y + 8, x:x + 8] = 255
+    tiles = cluster_to_tiles(sal, threshold=0.4, max_tiles=5, min_area_fraction=0.0001)
+    assert len(tiles) == 5
+
+
+# --- Phase 4: via_verify_region with mock verifier ---
+
+
+class _FakeVerifier:
+    model_id = "test/fake-verifier"
+    capabilities = ("verify",)
+
+    def __init__(self, verdict_result):
+        self._verdict = verdict_result
+
+    def verify(self, image_crop, label):
+        return self._verdict
+
+
+def test_verify_region_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    from annotate.models.base import Verdict
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    fake = _FakeVerifier(Verdict("x", "yes", 0.9))
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    reg._loaded["verify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_verify_region(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_verify_region_label_missing(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Add a region with no label
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 50, 50, 100, 100], av={})
+    mid = json.loads(_text(add))["metadata_id"]
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_verify_region(store, registry_map, reg, metadata_id=mid)
+    assert "no label" in _text(result)
+
+
+def test_verify_region_happy_path(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_verify_region
+    from annotate.models.base import Verdict
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 200, 200, 200, 200], av={"label": "windscreen"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    fake = _FakeVerifier(Verdict(
+        label_claimed="windscreen",
+        verdict="no",
+        confidence=0.78,
+        supporting=[],
+        contradicting=["a leather helmet covering the head"],
+        suggested_label="leather flying helmet",
+    ))
+    reg = ModelRegistry(default_config())
+    reg._loaded["verify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_verify_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["verdict"] == "no"
+    assert data["suggested_label"] == "leather flying helmet"
+    assert data["crop_window_pixel"][2] >= 200  # crop includes padding
+    assert data["model"] == "test/fake-verifier"
+
+
+# --- Label-match heuristic (no torch needed) ---
+
+def test_label_match_finds_token_overlap():
+    from annotate.models.florence2 import _label_match
+    ok, conf = _label_match("a brown leather flying helmet with goggles", "leather helmet")
+    assert ok is True
+    assert conf > 0.7
+
+
+def test_label_match_misses_unrelated():
+    from annotate.models.florence2 import _label_match
+    ok, _ = _label_match("a windscreen", "leather helmet")
+    assert ok is False
+
+
+def test_extract_suggested_label_pulls_noun_phrase():
+    from annotate.models.florence2 import _extract_suggested_label
+    assert _extract_suggested_label("A brown leather helmet with goggles") == "brown leather helmet"
+    assert _extract_suggested_label("the small wooden boat") == "small wooden boat"
+
+
+# --- shape-encoding-fit heuristic (no torch needed) ---
+
+def test_shape_encoding_fit_flags_very_long_rectangles():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    # 600px wide × 50px tall — aspect 12 → marginal
+    fit, note = _shape_encoding_fit([2, 0, 0, 600, 50], (0, 0, 600, 50))
+    assert fit == "marginal"
+    assert "polyline" in note
+
+
+def test_shape_encoding_fit_passes_balanced_rectangles():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    fit, note = _shape_encoding_fit([2, 0, 0, 200, 150], (0, 0, 200, 150))
+    assert fit == "good"
+    assert note is None
+
+
+def test_shape_encoding_fit_flags_non_square_circle():
+    from annotate.models.clip_grader import _shape_encoding_fit
+    # Circle whose bbox is 200×100 — should suggest ellipse instead
+    fit, _ = _shape_encoding_fit([3, 100, 50, 50], (0, 0, 200, 100))
+    assert fit == "marginal"
+
+
+# --- Phase 1: local-model stub tools ---
+
+def test_model_status_with_no_registry_returns_disabled():
+    from annotate.server import handle_model_status
+    result = handle_model_status(None)
+    data = json.loads(_text(result))
+    assert data["ai_extra_available"] is False
+    assert data["loaded"] == []
+    assert "install" in data["hint"].lower()
+
+
+def test_model_status_with_registry_returns_snapshot():
+    from annotate.server import handle_model_status
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_model_status(reg)
+    data = json.loads(_text(result))
+    assert "configured_pipelines" in data
+    assert "detect.default" in data["configured_pipelines"]
+
+
+def test_ai_stub_response_advertises_install_hint_when_extra_missing():
+    from annotate.server import _ai_stub_response
+    result = _ai_stub_response("via_suggest_regions", None)
+    data = json.loads(_text(result))
+    assert data["tool"] == "via_suggest_regions"
+    assert data["available"] is False
+    # When extra is missing, an install hint should appear
+    if not data.get("ai_extra_installed"):
+        assert "annotate[ai]" in data["install_hint"]
+
+
 def test_get_image_crop_overlay_skips_off_crop_regions(store, tmp_path):
     """Regression for the phantom-label bug (12-vermeer): a region whose box is
     entirely outside the crop window must not render a label at the clamped
@@ -760,3 +1568,82 @@ def test_main_heals_stale_src_urls(tmp_path, monkeypatch):
     after = s1.get()
     assert after["file"]["1"]["src"] == "http://localhost:22222/img/stale.jpg"
     assert after["file"]["1"]["abs_path"] == str(img)  # preserved
+
+
+# --- Florence-2 config compat patch ---
+
+# --- via_capabilities ---
+
+def test_capabilities_returns_expected_structure(store):
+    from annotate.server import handle_capabilities
+    result = handle_capabilities(store, registry=None)
+    data = json.loads(_text(result))
+    assert "server_version" in data
+    assert "python_version" in data
+    assert "extras" in data
+    assert set(data["extras"].keys()) >= {"ai", "io", "ocr", "yolo", "chat"}
+    assert all(isinstance(v, bool) for v in data["extras"].values())
+    assert "system_binaries" in data
+    assert set(data["system_binaries"].keys()) >= {"exiftool", "tesseract", "poppler_utils"}
+    assert all(isinstance(v, bool) for v in data["system_binaries"].values())
+    assert "ai_pipelines" in data
+    assert data["ai_pipelines"] == []
+
+
+def test_capabilities_with_registry_includes_pipelines(store):
+    from annotate.server import handle_capabilities
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_capabilities(store, registry=reg)
+    data = json.loads(_text(result))
+    assert isinstance(data["ai_pipelines"], list)
+    assert len(data["ai_pipelines"]) > 0
+
+
+# --- Florence-2 config compat patch ---
+
+def test_florence2_compat_patch_wraps_init():
+    """_patch_florence2_config_compat wraps __init__ to inject forced_bos_token_id."""
+    from annotate.models.florence2 import Florence2Adapter
+
+    class _BrokenConfig:
+        _annotate_f2_compat = False
+        attribute_map: dict = {}
+
+        def __init__(self, **kwargs):
+            _ = self.__dict__["forced_bos_token_id"]  # KeyError → simulated AttributeError
+
+    with pytest.raises((AttributeError, KeyError)):
+        _BrokenConfig()
+
+    orig_init = _BrokenConfig.__init__
+
+    def _compat_init(cfg_self, *args, **kwargs):
+        kwargs.setdefault("forced_bos_token_id", None)
+        orig_init(cfg_self, *args, **kwargs)
+
+    _BrokenConfig.__init__ = _compat_init
+    _BrokenConfig._annotate_f2_compat = True
+
+    id_before = id(_BrokenConfig.__init__)
+    if not getattr(_BrokenConfig, "_annotate_f2_compat", False):
+        _BrokenConfig.__init__ = _compat_init
+    assert id(_BrokenConfig.__init__) == id_before
+
+
+def test_florence2_compat_patch_graceful_on_missing_transformers(monkeypatch):
+    """_patch_florence2_config_compat is a no-op when dynamic_module_utils unavailable."""
+    import builtins
+    from annotate.models.florence2 import Florence2Adapter
+
+    adapter = Florence2Adapter("microsoft/Florence-2-base")
+
+    real = builtins.__import__
+
+    def _blocking_import(name, *args, **kwargs):
+        if name == "transformers.dynamic_module_utils":
+            raise ImportError("simulated missing transformers")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _blocking_import)
+    adapter._patch_florence2_config_compat()
