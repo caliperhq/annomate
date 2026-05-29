@@ -18,15 +18,51 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from annotate.models.base import Adapter, Answer
+import re
+
+from annotate.models.base import Adapter, Answer, Verdict
 from annotate.models.registry import register_adapter
+
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "and", "or", "in", "on", "with", "at", "to",
+    "for", "by", "is", "are", "was", "were", "be", "being", "been",
+    "this", "that", "these", "those", "it", "its",
+})
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9']+", text.lower())
+        if w not in _STOPWORDS and len(w) > 1
+    }
+
+
+def _label_match(caption: str, label: str) -> tuple[bool, float]:
+    label_toks = _tokens(label)
+    caption_toks = _tokens(caption)
+    if not label_toks:
+        return (False, 0.0)
+    matched = label_toks & caption_toks
+    if not matched:
+        return (False, 0.2)
+    coverage = len(matched) / len(label_toks)
+    return (True, 0.5 + 0.5 * coverage)
+
+
+def _extract_suggested_label(caption: str) -> str | None:
+    text = caption.strip().rstrip(".")
+    m = re.match(r"^\s*(?:an?|the)\s+([a-z]+(?:\s+[a-z]+){0,2})", text, re.I)
+    if m:
+        return m.group(1).strip()
+    parts = re.findall(r"[A-Za-z']+", text)
+    return " ".join(parts[:3]) if parts else None
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 
 class ChatVlmAdapter(Adapter):
-    capabilities = ("ask",)
+    capabilities = ("ask", "verify")
 
     # Rough on-disk weights for budget estimation. Anything not listed
     # falls back to 2000 — better to over-estimate than under.
@@ -110,15 +146,22 @@ class ChatVlmAdapter(Adapter):
             ],
         })
 
-        # apply_chat_template produces both the text and any image-token
-        # bookkeeping the processor needs. Some processors accept the
-        # messages directly via apply_chat_template(..., tokenize=True,
-        # return_tensors="pt") — we use the universal two-step path.
+        # apply_chat_template produces the text with image-token placeholders.
+        # Qwen2.5-VL needs process_vision_info to extract PIL images from the
+        # messages dict before passing them to the processor; other VLMs are
+        # fine with [image] directly.
         text = self._processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
         )
+        try:
+            from qwen_vl_utils import process_vision_info
+            image_inputs, video_inputs = process_vision_info(messages)
+        except ImportError:
+            image_inputs, video_inputs = [image], None
         inputs = self._processor(
-            text=[text], images=[image], padding=True, return_tensors="pt",
+            text=[text], images=image_inputs,
+            videos=video_inputs or None,
+            padding=True, return_tensors="pt",
         )
         inputs = {k: (v.to(self._resolved_device) if hasattr(v, "to") else v)
                   for k, v in inputs.items()}
@@ -138,6 +181,31 @@ class ChatVlmAdapter(Adapter):
             text=text_out,
             finish_reason="length" if new_tokens.shape[1] >= max_new_tokens else "stop",
             tokens_generated=int(new_tokens.shape[1]),
+        )
+
+
+    def verify(self, image_crop: "PILImage", label: str) -> Verdict:
+        """Crop-and-verify using a plain description prompt.
+
+        Asks the model to describe the crop, then checks whether the claimed
+        label appears in the response using the same token-overlap heuristic
+        as the Florence-2 adapter it replaces.
+        """
+        answer = self.ask(
+            image_crop,
+            "Identify what is in this image.",
+            max_new_tokens=200,
+        )
+        caption = answer.text
+        matches, confidence = _label_match(caption, label)
+        suggested = _extract_suggested_label(caption) if not matches else None
+        return Verdict(
+            label_claimed=label,
+            verdict="yes" if matches else "no" if caption else "unsure",
+            confidence=confidence,
+            supporting=[caption] if matches else [],
+            contradicting=[caption] if not matches and caption else [],
+            suggested_label=suggested,
         )
 
 

@@ -232,10 +232,12 @@ class YoloeAdapter(Adapter):
             "bboxes": np.array([[rx0, ry0, rx1, ry1]]),
             "cls": np.array([0]),
         }
+        from ultralytics.models.yolo.yoloe import YOLOEVPSegPredictor
         results = self._model.predict(
             source=target_image,
             refer_image=reference_image,
             visual_prompts=visual_prompts,
+            predictor=YOLOEVPSegPredictor,
             conf=min_confidence,
             device=self._resolved_device,
             verbose=False,

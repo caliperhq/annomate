@@ -72,7 +72,7 @@ first, then apply via `via_update_region` if preferred.
 
 ### `via_verify_region(metadata_id)`
 
-VLM crop-and-verify. Florence-2 describes the cropped region; if the
+VLM crop-and-verify. Qwen2.5-VL-3B identifies the cropped region; if the
 label is in the description, the verdict is `yes` with the description
 as supporting evidence; if not, `no` with the description as
 contradicting evidence plus a `suggested_label` extracted from the
@@ -145,7 +145,7 @@ Most AI tools default to:
 | detect (fast) | `detect.fast` | YOLO-World (`[yolo]` extra) |
 | segment | `segment.default` | SAM 2 hiera-tiny |
 | segment (native) | `segment.yoloe` | YOLOE-11l (`[yolo]` extra, AGPL) |
-| verify | `verify.default` | Florence-2-base |
+| verify | `verify.default` | Qwen2.5-VL-3B (`[ai]`+`[chat]` extras) |
 | grade | `grade.default` | CLIP-ViT-B/32 |
 | classify | `classify.default` | CLIP-ViT-B/32 |
 | ask | `ask.default` | Qwen2.5-VL-3B (`[chat]` extra) |
