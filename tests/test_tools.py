@@ -59,10 +59,28 @@ def test_get_project_no_project(store):
 
 
 def test_get_project_returns_json(loaded_store):
-    result = handle_get_project(loaded_store)
+    result = handle_get_project(loaded_store, full=True)
     data = json.loads(_text(result))
     assert "file" in data
     assert "metadata" in data
+
+
+def test_get_project_default_returns_summary(loaded_store):
+    result = handle_get_project(loaded_store)
+    data = json.loads(_text(result))
+    assert "file_count" in data
+    assert "region_count" in data
+    assert "files" in data
+    assert "attributes" in data
+    assert "note" in data
+    assert "metadata" not in data
+
+
+def test_get_project_full_returns_raw_json(loaded_store):
+    result = handle_get_project(loaded_store, full=True)
+    data = json.loads(_text(result))
+    assert "metadata" in data
+    assert "file" in data
 
 
 # --- via_list_files ---

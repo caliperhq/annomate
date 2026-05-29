@@ -197,11 +197,48 @@ def _next_id(mapping: dict) -> int:
 # Tool handlers — take store as first arg for testability
 # ---------------------------------------------------------------------------
 
-def handle_get_project(store: ProjectStore) -> list[types.TextContent]:
+def handle_get_project(store: ProjectStore, full: bool = False) -> list[types.TextContent]:
     project = store.get()
     if project is None:
         return _text("No project loaded. Ask the user to open the VIA annotator and push a project.")
-    return _text(json.dumps(project, indent=2))
+    if full:
+        return _text(json.dumps(project, indent=2))
+
+    metadata = project.get("metadata", {})
+    files = project.get("file", {})
+    views = project.get("view", {})
+
+    fid_to_vid: dict[str, str] = {}
+    for vid, v in views.items():
+        for fid in v.get("fid_list", []):
+            fid_to_vid[str(fid)] = vid
+
+    vid_region_count: dict[str, int] = {}
+    for m in metadata.values():
+        vid = m.get("vid", "")
+        vid_region_count[vid] = vid_region_count.get(vid, 0) + 1
+
+    files_summary = [
+        {
+            "fid": fid,
+            "fname": f.get("fname", ""),
+            "vid": fid_to_vid.get(fid, ""),
+            "region_count": vid_region_count.get(fid_to_vid.get(fid, ""), 0),
+        }
+        for fid, f in files.items()
+    ]
+
+    proj = project.get("project", {})
+    return _text(json.dumps({
+        "pid": proj.get("pid"),
+        "pname": proj.get("pname"),
+        "rev": proj.get("rev"),
+        "file_count": len(files),
+        "region_count": len(metadata),
+        "files": files_summary,
+        "attributes": project.get("attribute", {}),
+        "note": "Pass full=true to get the complete project JSON.",
+    }, indent=2))
 
 
 def handle_list_files(store: ProjectStore) -> list[types.TextContent]:
@@ -1926,8 +1963,23 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             ),
             types.Tool(
                 name="via_get_project",
-                description="Return the full VIA project JSON (files, views, metadata, attributes).",
-                inputSchema={"type": "object", "properties": {}, "required": []},
+                description=(
+                    "Return a summary of the VIA project: file list with per-file region "
+                    "counts, attribute schema, pid/rev. Pass full=true to get the raw "
+                    "project JSON (can be very large on multi-image projects — prefer "
+                    "via_get_annotations(vid=...) for reading regions)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "full": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Return the full raw project JSON (default: summary only)",
+                        },
+                    },
+                    "required": [],
+                },
             ),
             types.Tool(
                 name="via_list_files",
@@ -2382,7 +2434,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             if name == "via_get_annotator_url":
                 return _text(annotator_url)
             if name == "via_get_project":
-                return handle_get_project(store)
+                return handle_get_project(store, full=bool(arguments.get("full", False)))
             if name == "via_list_files":
                 return handle_list_files(store)
             if name == "via_get_annotations":
