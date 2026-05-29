@@ -1393,8 +1393,11 @@ def handle_tighten_region(
     except Exception as e:
         return _text(f"Failed to load segmenter: {e}")
 
+    is_polygon_input = (int(shape) == 7) if isinstance(shape, (int, float)) else False
+
     try:
-        mask = adapter.segment(img, box=(x0, y0, x1, y1))
+        mask = adapter.segment(img, box=(x0, y0, x1, y1),
+                               return_polygon=is_polygon_input)
     except Exception as e:
         return _text(f"Segmenter raised: {e}")
 
@@ -1405,7 +1408,16 @@ def handle_tighten_region(
 
     applied = False
     if auto_apply:
-        project["metadata"][metadata_id]["xy"] = tightened_pixel
+        if is_polygon_input and mask.polygon_xy is not None:
+            # Convert fraction polygon to pixel polygon for storage
+            poly_pixel: list = [7]
+            pts = mask.polygon_xy[1:]
+            for i in range(0, len(pts) - 1, 2):
+                poly_pixel.append(int(pts[i] * W))
+                poly_pixel.append(int(pts[i + 1] * H))
+            project["metadata"][metadata_id]["xy"] = poly_pixel
+        else:
+            project["metadata"][metadata_id]["xy"] = tightened_pixel
         store.set_project(project)
         applied = True
 
@@ -1419,6 +1431,8 @@ def handle_tighten_region(
         "mask_area_fraction": round(mask.area_fraction, 6) if mask.area_fraction is not None else None,
         "auto_applied": applied,
     }
+    if mask.polygon_xy is not None:
+        response["tightened_polygon_fraction"] = mask.polygon_xy
     return _text(json.dumps(response, indent=2))
 
 
@@ -2387,9 +2401,12 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 name="via_tighten_region",
                 description=(
                     "[Phase 3] Use SAM-style promptable segmentation to tighten "
-                    "an existing region's box to the actual object outline. "
-                    "Returns the original box, the tightened box, IoU between "
-                    "them, and mask area. Does not write unless auto_apply=True."
+                    "an existing region's box (or polygon) to the actual object outline. "
+                    "Rectangle input: returns tightened bbox + IoU. "
+                    "Polygon input: also returns tightened_polygon_fraction — a "
+                    "SAM-mask contour in [7, x1, y1, ...] fraction encoding — and "
+                    "auto_apply=True writes the polygon, not the bbox. "
+                    "Does not write unless auto_apply=True."
                 ),
                 inputSchema={
                     "type": "object",

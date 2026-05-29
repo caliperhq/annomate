@@ -908,6 +908,89 @@ def test_tighten_region_auto_apply_writes_back(store, tmp_path):
     assert project["metadata"][mid]["xy"] == [2, 200, 200, 300, 300]
 
 
+class _FakeSegmenterWithPolygon:
+    model_id = "test/fake-segmenter-poly"
+    capabilities = ("segment",)
+
+    def __init__(self):
+        from annotate.models.base import Mask
+        self._result = Mask(
+            xy=[2, 0.2, 0.2, 0.3, 0.3],
+            iou_with_input=0.72,
+            area_fraction=0.06,
+            raster=None,
+            polygon_xy=[7, 0.2, 0.2, 0.5, 0.2, 0.35, 0.5],
+        )
+
+    def segment(self, image, **kwargs):
+        return self._result
+
+
+def test_tighten_region_polygon_input_returns_polygon_output(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[7, 100, 100, 500, 100, 350, 500],
+                            av={"label": "shape"}, xy_space="original")
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenterWithPolygon())
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+
+    assert "tightened_polygon_fraction" in data
+    poly = data["tightened_polygon_fraction"]
+    assert poly[0] == 7
+    assert len(poly) >= 7  # shape_id + at least 3 pairs
+
+
+def test_tighten_region_polygon_auto_apply_writes_polygon(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[7, 100, 100, 500, 100, 350, 500],
+                            av={"label": "shape"}, xy_space="original")
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenterWithPolygon())
+    handle_tighten_region(store, registry_map, reg, metadata_id=mid, auto_apply=True)
+
+    project = store.get()
+    stored_xy = project["metadata"][mid]["xy"]
+    assert stored_xy[0] == 7
+
+
+def test_tighten_region_bbox_input_unchanged_behaviour(store, tmp_path):
+    """Existing bbox tighten behaviour is unaffected when adapter has no polygon."""
+    from PIL import Image as PILImage
+    from annotate.server import handle_tighten_region
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 400, 400], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+
+    reg = _registry_with_pipeline(_FakeSegmenter([2, 0.2, 0.2, 0.3, 0.3]))
+    result = handle_tighten_region(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+
+    assert "tightened_polygon_fraction" not in data
+    assert data["tightened_xy_pixel"] == [2, 200, 200, 300, 300]
+
+
 def test_grade_annotations_empty_fid_returns_empty_set(store, tmp_path):
     from PIL import Image as PILImage
     from annotate.server import handle_grade_annotations

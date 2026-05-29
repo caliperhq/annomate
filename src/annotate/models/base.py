@@ -51,6 +51,7 @@ class Mask:
     iou_with_input: float | None = None
     area_fraction: float | None = None   # mask area / image area
     raster: "PILImage | None" = None     # binary mask if caller wants it
+    polygon_xy: list | None = None       # contour polygon [7, x1/W,y1/H, ...]
 
 
 @dataclass

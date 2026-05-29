@@ -84,10 +84,13 @@ class Sam2Adapter(Adapter):
         box: tuple[float, float, float, float] | None = None,
         point: tuple[float, float] | None = None,
         text: str | None = None,
+        return_polygon: bool = False,
     ) -> Mask:
         """Segment with a box (preferred) or point prompt. Coordinates are in
         the image's own pixel space. Returns a Mask whose ``xy`` is the
-        tightened bbox in fraction-of-image space."""
+        tightened bbox in fraction-of-image space. When return_polygon=True
+        and OpenCV is available, also populates Mask.polygon_xy with a
+        simplified contour polygon in fraction space."""
         if not self._loaded:
             self.load()
         if text is not None:
@@ -142,6 +145,7 @@ class Sam2Adapter(Adapter):
                 iou_with_input=1.0 if box else None,
                 area_fraction=0.0,
                 raster=None,
+                polygon_xy=None,
             )
 
         tx1 = int(xs.min())
@@ -169,11 +173,32 @@ class Sam2Adapter(Adapter):
 
         area_fraction = float(mask.sum().item()) / float(W * H)
 
+        polygon_xy: list | None = None
+        if return_polygon and len(xs) > 0:
+            try:
+                import cv2
+                import numpy as np
+                mask_np = mask.numpy().astype(np.uint8)
+                contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    main = max(contours, key=cv2.contourArea)
+                    epsilon = 0.005 * cv2.arcLength(main, True)
+                    approx = cv2.approxPolyDP(main, epsilon, True)
+                    pts = approx.squeeze(axis=1)
+                    if pts.ndim == 2 and len(pts) >= 3:
+                        polygon_xy = [7]
+                        for px, py in pts:
+                            polygon_xy.append(round(int(px) / W, 6))
+                            polygon_xy.append(round(int(py) / H, 6))
+            except Exception:
+                pass  # OpenCV unavailable or contour failed — bbox-only fallback
+
         return Mask(
             xy=[2, x_frac, y_frac, w_frac, h_frac],
             iou_with_input=iou_val,
             area_fraction=area_fraction,
             raster=None,
+            polygon_xy=polygon_xy,
         )
 
 
