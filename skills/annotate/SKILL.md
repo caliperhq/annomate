@@ -43,6 +43,8 @@ If you're not sure which kind of image you have, start with a small batch.
 
 ## Tool Quick Reference
 
+### Core annotation tools (always available)
+
 | Situation | Tool |
 |-----------|------|
 | Get annotator URL | `via_get_annotator_url` |
@@ -57,6 +59,22 @@ If you're not sure which kind of image you have, start with a small batch.
 | Remove an annotation | `via_delete_region` |
 | Bulk / wholesale changes | `via_update_project` |
 | Save project JSON to disk | `via_save_project` |
+
+### Local-model assistance (optional; needs `pip install 'annotate[ai]'`)
+
+| Situation | Tool |
+|-----------|------|
+| What models are configured / loaded? | `via_model_status` |
+| Seed candidate boxes from text prompts | `via_suggest_regions` |
+| Find what I *missed* on this image | `via_suggest_regions(exclude_existing=True, broad_prompts=True)` |
+| Tighten a loose box to the actual object outline | `via_tighten_region` |
+| "Does this region really show what I labelled?" | `via_verify_region` |
+| Score every region for position / size / label match | `via_grade_annotations` |
+| Classify the scene (cached → auto-routes other tools) | `via_classify_scene` |
+
+The AI tools are advertised even when the `[ai]` extra isn't installed —
+they return a structured `install_hint` rather than erroring. Call
+`via_model_status` to see what's available before relying on them.
 
 Prefer `via_get_annotations` over `via_get_project` for reads — it returns only
 metadata, not the full project blob. After the user corrects placements in the
@@ -430,6 +448,112 @@ on the area at full resolution. The crop is taken from the original image,
 so a 500×500 window inside a 4651×3101 photo comes back at native pixel
 density, not the heavily-downscaled view.
 
+## Local-model assistance (when available)
+
+A set of optional tools that delegate the boring/repetitive parts of the
+loop to small local models. They're advertised on the MCP surface even
+without the `[ai]` extra installed — they just return a structured
+install hint so you can suggest `pip install 'annotate[ai]'` to the user
+rather than crashing. Call `via_model_status` if you're unsure what's
+loaded.
+
+**Nothing is auto-written.** Every AI tool returns *candidates* or a
+*report* — you (and the user) still decide what makes it into the
+project via `via_add_region` / `via_update_region`. Treat every
+suggestion as a hint, not a fact.
+
+**`via_suggest_regions(fid, prompts=[...])`** — open-vocabulary
+detection from text prompts, with automatic tiling so small objects in
+large images don't get downscaled into invisibility. Use when:
+- Annotating a dense scene with many similar features (Avercamp-style
+  ice skaters, Marché Dauphine instruments) — seed candidates, then
+  review/edit rather than placing every box from scratch.
+- The image is large (≥ 2048 px on the longest edge) and you'd
+  otherwise be eyeballing positions off a downscaled view.
+
+```
+via_suggest_regions(fid="3", prompts=["person", "horse", "boat"], tiling="auto")
+→ {candidates: [{xy, label, score, tile}, ...], tile_grid: "4x4", ...}
+```
+
+Tiling modes: `none` / `2x2` / `4x4` / `8x8` / `16x16` / `auto` /
+`adaptive`. Use `auto` (default) unless you have a specific reason;
+`adaptive` runs saliency clustering to focus on busy regions.
+
+**`via_suggest_regions(..., exclude_existing=True, broad_prompts=True)`**
+— **find-missing mode.** Same tool, two flags: subtracts anything you've
+already annotated and runs a default broad prompt set ("person, animal,
+vehicle, instrument, tool, text, ..."). Use as a final pass before
+declaring done — catches the V-formation in the sky you didn't notice,
+the lone figure on the perimeter road, the small object in the corner.
+
+**`via_tighten_region(metadata_id)`** — SAM-based box refinement. Pass
+an existing region; SAM segments inside the box and returns a tight
+bbox derived from the mask, plus the IoU between original and tightened
+and the mask's area. Use when:
+- Your initial box is "roughly right" but you want crisp edges.
+- The named object has parts you might have clipped (foot warmer base,
+  church spire, extended limb) — SAM often catches the full extent.
+
+Returns the tightened coords; **does not write** unless you call with
+`auto_apply=True`. The default (`auto_apply=False`) is the right
+behaviour during interactive work — review the proposed change, then
+apply via `via_update_region` if it looks right.
+
+**`via_verify_region(metadata_id)`** — VLM crop-and-verify. Florence-2
+describes the cropped region; if the label is in the description, the
+verdict is `yes` with the description as supporting evidence; if not,
+`no` with the description as contradicting evidence plus a
+`suggested_label` extracted from the caption. Use when:
+- The named-part is ambiguous and you want a sanity check before save
+  (the 04-haefeli pilot↔windscreen swap would have been caught here).
+- You're not sure between two plausible identifications.
+- Pre-save linting: run over every region with a non-trivial label.
+
+The verdict is heuristic — read the supporting / contradicting text and
+use your own judgment. Don't auto-relabel on `no`; surface the result
+for review.
+
+**`via_grade_annotations(fid)`** — CLIP-cosine rubric scoring every
+region (or a subset via `mids=[...]`) on position, size, label match,
+and shape-encoding fit. Use when:
+- You want a quick pass over a finished annotation set to flag any
+  obvious issues before handoff / save.
+- The user has corrected several regions and you want to learn from the
+  pattern (high-scoring regions tend to be the ones they didn't touch).
+
+Reports only — never modifies the project. Each flagged region comes
+with `issues` notes; surface those to the user rather than silently
+acting.
+
+**`via_classify_scene(fid)`** — zero-shot scene classification (CLIP
+against a config-defined label set: `dense_crowd`, `painting`,
+`aerial_or_satellite`, etc.). Persists the top label on the file entry
+as `scene_class` so subsequent detection / segment / verify / grade
+calls automatically route to the pipeline configured for that scene.
+Run once at the start of a session on each new file; it costs
+sub-second and influences every downstream call.
+
+### Typical AI-assisted flow
+
+For a new dense image:
+
+1. `via_add_file(path)` → fid
+2. `via_classify_scene(fid)` — sets routing for the rest
+3. `via_suggest_regions(fid, prompts=[...broad list of expected things...])`
+4. Review the candidates: accept good ones via `via_add_region`, drop
+   bad ones, edit borderline ones.
+5. For any candidate where the bbox looks loose: `via_tighten_region(mid)`.
+6. After your own annotation pass:
+   `via_suggest_regions(fid, exclude_existing=True, broad_prompts=True)`
+   — catches the things you missed.
+7. Pre-save lint: `via_grade_annotations(fid)`; for anything flagged,
+   `via_verify_region(mid)` on the suspicious labels.
+8. User reviews in the browser. Apply their corrections.
+
+For a single-subject photo: skip steps 2–3 and 6; the AI tools' value
+shows up on dense / large images.
+
 ## Common Patterns
 
 **"Annotate this image" / "Load img002.jpg"**
@@ -462,6 +586,30 @@ on the suspected area; full-res crop reveals what the downscaled overlay hid
 → `via_get_annotations(format="fraction")`, compare against the fractions
 you last placed. Pixel-space diffs require manual scale arithmetic; the
 fraction format makes the deltas readable directly.
+
+**"This image has a lot of stuff — help me find candidates"**
+→ `via_classify_scene(fid)` then
+`via_suggest_regions(fid, prompts=[...])`. The classifier sets routing;
+the suggester returns boxes to review.
+
+**"Did I miss anything?"**
+→ `via_suggest_regions(fid, exclude_existing=True, broad_prompts=True)`.
+Returns candidates that don't overlap your existing annotations.
+
+**"That box looks loose around the object — can you tighten it?"**
+→ `via_tighten_region(metadata_id)`, review the proposed tighter box,
+then `via_update_region` if it looks right.
+
+**"Am I sure this is actually a windscreen?"**
+→ `via_verify_region(metadata_id)`. The VLM describes what it sees;
+read the supporting/contradicting text and decide.
+
+**"Quality-check my annotations before saving"**
+→ `via_grade_annotations(fid)`, surface anything flagged to the user.
+
+**"What models are available?"** / **"Why isn't the AI doing anything?"**
+→ `via_model_status`. Reports whether the `[ai]` extra is installed,
+configured pipelines, currently loaded adapters, memory use.
 
 **"Re-annotate everything based on..."**
 → `via_update_project` with the full modified project JSON
