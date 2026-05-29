@@ -1,9 +1,9 @@
 ---
-name: annotate
+name: annomate
 description: Use when the user wants to annotate images in VIA, discuss or analyze VIA annotations, asks Claude to add/review/analyze bounding boxes or regions, or mentions opening the VIA annotator. Also trigger when the user shares a VIA project JSON file.
 ---
 
-# annotate
+# annomate
 
 ## Overview
 
@@ -93,7 +93,7 @@ For the recurring failure modes that even a careful loop misses, read
 | Load a PDF as one file per page | `via_load_document` |
 | OCR an image / region → word boxes | `via_run_ocr` |
 
-### Local-model assistance (optional; needs `pip install 'annotate[ai]'`)
+### Local-model assistance (optional; needs `pip install 'annomate[ai]'`)
 
 | Situation | Tool |
 |-----------|------|
@@ -147,7 +147,7 @@ schema already installed.
 
 **Format support.** Pillow-native formats (jpg, png, gif, webp, bmp,
 tiff) work out of the box. HEIC / HEIF / AVIF (default iPhone-camera
-format) and PDF need the `[io]` extra: `pip install 'annotate[io]'`
+format) and PDF need the `[io]` extra: `pip install 'annomate[io]'`
 (PDF also needs `poppler-utils` on the system path). Non-browser-
 native formats (HEIC, BMP, TIFF, PDF pages) are converted once to
 JPEG and cached at `~/.cache/annotate/converted/` for browser

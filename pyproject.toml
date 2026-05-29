@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "annotate"
+name = "annomate"
 version = "0.1.0-dev"
 description = "MCP server for VIA v3 — lets Claude read and write image annotations in real time"
 readme = "README.md"
@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-# Local-model assistance layer. Pull these in with `pip install annotate[ai]`.
+# Local-model assistance layer. Pull these in with `pip install annomate[ai]`.
 # Base package stays small; AI tools advertise themselves but return a helpful
 # "install the [ai] extra" error when these deps aren't present.
 ai = [
@@ -60,10 +60,12 @@ ocr = [
 ]
 
 [project.scripts]
-annotate = "annotate.server:main"
+# Binary is `annomate`; the Python import package is still `annotate`
+# (source dir rename deferred — not breaking anything).
+annomate = "annotate.server:main"
 
 [project.urls]
-Repository = "https://github.com/caliperhq/annotate"
+Repository = "https://github.com/caliperhq/annomate"
 
 [tool.setuptools.packages.find]
 where = ["src"]

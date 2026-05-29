@@ -1,4 +1,4 @@
-# annotate
+# annomate
 
 MCP server for [VIA v3](https://gitlab.com/vgg/via) — lets Claude Code read
 and write image annotations in real time alongside the user.
@@ -30,31 +30,34 @@ instead of erroring.
 
 ### Base (annotation server only)
 
+`annomate` is not on PyPI — install from GitHub:
+
 ```bash
-python -m venv ~/.local/annotate
-~/.local/annotate/bin/pip install annotate
+python -m venv ~/.local/annomate
+~/.local/annomate/bin/pip install \
+  'annomate @ git+https://github.com/caliperhq/annomate.git'
 ```
 
 ### Pick the extras you want
 
 ```bash
 # Local AI models (~3 GB on disk, lazy-downloaded on first use)
-pip install 'annotate[ai]'
+pip install 'annomate[ai] @ git+https://github.com/caliperhq/annomate.git'
 
 # Faster detection (YOLO-World, ~95 MB)
-pip install 'annotate[ai,yolo]'
+pip install 'annomate[ai,yolo] @ git+https://github.com/caliperhq/annomate.git'
 
 # Free-form Q&A via chat VLM (Qwen2.5-VL-3B, ~6 GB)
-pip install 'annotate[ai,chat]'
+pip install 'annomate[ai,chat] @ git+https://github.com/caliperhq/annomate.git'
 
 # Format conversion (HEIC, PDF) + EXIF metadata
-pip install 'annotate[io]'
+pip install 'annomate[io] @ git+https://github.com/caliperhq/annomate.git'
 
 # OCR via Tesseract
-pip install 'annotate[ocr]'
+pip install 'annomate[ocr] @ git+https://github.com/caliperhq/annomate.git'
 
 # Everything
-pip install 'annotate[ai,yolo,chat,io,ocr]'
+pip install 'annomate[ai,yolo,chat,io,ocr] @ git+https://github.com/caliperhq/annomate.git'
 ```
 
 ## System packages
@@ -80,8 +83,8 @@ Add to your Claude Code MCP config (`.mcp.json`):
 ```json
 {
   "mcpServers": {
-    "annotate": {
-      "command": "/path/to/annotate"
+    "annomate": {
+      "command": "/path/to/annomate"
     }
   }
 }
@@ -90,18 +93,18 @@ Add to your Claude Code MCP config (`.mcp.json`):
 Find your entry point after install:
 
 ```bash
-which annotate                    # global/user install
-~/.local/annotate/bin/annotate    # venv
+which annomate                    # global/user install
+~/.local/annomate/bin/annomate    # venv
 ```
 
 ## Usage
 
 ```bash
-annotate                         # start server (port OS-assigned)
-annotate --port 9669             # pin the port
-annotate --browser               # open the UI on startup
-annotate --no-ai                 # skip the model registry entirely
-annotate --models-config FILE    # override ~/.config/annotate/models.toml
+annomate                         # start server (port OS-assigned)
+annomate --port 9669             # pin the port
+annomate --browser               # open the UI on startup
+annomate --no-ai                 # skip the model registry entirely
+annomate --models-config FILE    # override ~/.config/annomate/models.toml
 ```
 
 The local URL prints to stderr on startup. Open it to use the annotator; load
@@ -114,7 +117,7 @@ Install the companion Claude Code skill so Claude knows the annotation
 workflow, the AI tools, and the trigger-phrase patterns automatically:
 
 ```bash
-cp -r skills/annotate ~/.claude/skills/
+cp -r skills/annomate ~/.claude/skills/
 ```
 
 The skill is split into a small `SKILL.md` plus sibling reference files
@@ -140,7 +143,7 @@ The skill is split into a small `SKILL.md` plus sibling reference files
 
 `via_load_document` (PDFs), `via_read_metadata`, `via_run_ocr`
 
-See [`skills/annotate/`](skills/annotate/) for the full per-tool guidance,
+See [`skills/annomate/`](skills/annomate/) for the full per-tool guidance,
 and [`docs/design/`](docs/design/) for the longer-form design docs.
 
 ## License
@@ -158,7 +161,7 @@ that pipeline make sure that license fits your deployment context. See
 python -m venv venv
 venv/bin/pip install -e ".[dev]"
 venv/bin/pytest
-venv/bin/annotate --browser
+venv/bin/annomate --browser
 ```
 
 The VIA HTML is not committed directly; it's generated from the VIA

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working in this repository.
 
 ## What this is
 
-`annotate` is a Python MCP server that wraps VIA v3 (VGG Image Annotator).
+`annomate` is a Python MCP server that wraps VIA v3 (VGG Image Annotator).
 It runs two interfaces in one process:
 
 - **HTTP** (OS-assigned port): implements VIA's push/pull share protocol +
@@ -41,7 +41,7 @@ src/annotate/
     └── saliency.py       # OpenCV spectral residual (adaptive tiling)
 
 scripts/build_html.py     # Patches VIA HTML from submodule before release
-skills/annotate/          # Claude Code skill (SKILL.md + 5 reference files)
+skills/annomate/          # Claude Code skill (SKILL.md + 5 reference files)
 docs/design/              # Long-form design docs (AI layer, IO layer)
 tests/                    # pytest; no mocks for the I/O paths
 ```
@@ -81,9 +81,9 @@ python -m build
 ```bash
 python -m venv venv && venv/bin/pip install -e ".[dev]"
 venv/bin/pytest          # 186+ tests, some skip without optional extras
-venv/bin/annotate                # start server
-venv/bin/annotate --browser      # start and open browser
-venv/bin/annotate --no-ai        # skip the model registry
+venv/bin/annomate                # start server
+venv/bin/annomate --browser      # start and open browser
+venv/bin/annomate --no-ai        # skip the model registry
 ```
 
 ## Tests
@@ -99,7 +99,7 @@ inference are explicitly gated with `pytest.importorskip` or `skipif`.
 
 ## Skills
 
-`skills/annotate/SKILL.md` plus five sibling reference files are the
+`skills/annomate/SKILL.md` plus five sibling reference files are the
 source of truth for what the agent knows about this server:
 
 - `region-encoding.md` — shape table, coordinate spaces, geometry helpers
@@ -112,7 +112,7 @@ After editing, copy to the user-level install so the live Claude Code
 session picks the new version up immediately:
 
 ```bash
-cp skills/annotate/*.md ~/.claude/skills/annotate/
+cp skills/annomate/*.md ~/.claude/skills/annomate/
 ```
 
 ## VIA HTML token
