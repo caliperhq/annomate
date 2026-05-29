@@ -26,3 +26,7 @@ src/annotate/via_image_annotator.html
 .jscad-cache/
 docs/superpowers/
 .playwright-mcp/
+
+# Model weights (downloaded at runtime — not committed)
+*.pt
+*.ts

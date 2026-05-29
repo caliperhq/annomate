@@ -48,17 +48,27 @@ figure on the perimeter road, the small object in the corner.
 
 ### `via_tighten_region(metadata_id)`
 
-SAM-based box refinement. Pass an existing region; SAM segments inside
-the box and returns a tight bbox derived from the mask, plus the IoU
-between original and tightened and the mask's area. Use when:
+SAM-based region refinement. Pass an existing region; the segmenter
+runs inside the bounding box and returns a tightened result, plus IoU
+and mask area. Use when:
 - Your initial box is "roughly right" but you want crisp edges.
 - The named object has parts you might have clipped (foot warmer base,
   church spire, extended limb) — SAM often catches the full extent.
 
-Returns the tightened coords; **does not write** unless you call with
-`auto_apply=True`. The default (`auto_apply=False`) is the right
-behaviour during interactive work — review the proposed change, then
-apply via `via_update_region` if it looks right.
+**Rectangle input** → returns `tightened_xy_pixel` + `tightened_xy_fraction`.
+
+**Polygon input** (shape `[7, x1, y1, ...]`) → also returns
+`tightened_polygon_fraction`, a SAM-mask contour in the same `[7, ...]`
+fraction encoding. When you call `auto_apply=True` on a polygon region,
+the polygon contour is written back — not the bbox.
+
+Pipeline `segment.yoloe` (YOLOE native segmentation, no separate SAM
+pass) is faster and often tighter on objects the detector already knows.
+Use it via `via_tighten_region(mid, pipeline="yoloe")` when YOLOE is
+configured.
+
+**Does not write** unless `auto_apply=True`. Review the proposed change
+first, then apply via `via_update_region` if preferred.
 
 ### `via_verify_region(metadata_id)`
 
@@ -122,9 +132,8 @@ Visual-prompt one-shot detection. Takes an annotated region as the
 example; finds similar regions in the same image (default) or across
 a list of other images. Killer feature for dense scenes: annotate one
 ice skater, find all the others; annotate one bolt-head, find every
-bolt on the assembly. Requires the YOLOE pipeline (AGPL-3.0) to be
-enabled in `models.toml` — see the model registry config notes if you
-want this capability.
+bolt on the assembly. Runs on the `find_similar.default` pipeline
+(YOLOE-11l, AGPL-3.0). Returns candidates only — nothing is written.
 
 ## Pipeline overrides
 
@@ -135,11 +144,12 @@ Most AI tools default to:
 | detect | `detect.default` | GroundingDINO-tiny |
 | detect (fast) | `detect.fast` | YOLO-World (`[yolo]` extra) |
 | segment | `segment.default` | SAM 2 hiera-tiny |
+| segment (native) | `segment.yoloe` | YOLOE-11l (`[yolo]` extra, AGPL) |
 | verify | `verify.default` | Florence-2-base |
 | grade | `grade.default` | CLIP-ViT-B/32 |
 | classify | `classify.default` | CLIP-ViT-B/32 |
 | ask | `ask.default` | Qwen2.5-VL-3B (`[chat]` extra) |
-| find_similar | `find_similar.default` | YOLOE (AGPL, opt-in) |
+| find_similar | `find_similar.default` | YOLOE-11l (`[yolo]` extra, AGPL) |
 
 Override per call via `pipeline=`. The `detect.fast` pipeline (YOLO-
 World) is an order-of-magnitude faster than the default on CPU; swap
