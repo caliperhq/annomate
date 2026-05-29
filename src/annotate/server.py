@@ -723,19 +723,19 @@ def handle_model_status(registry) -> list[types.TextContent]:
     return _text(json.dumps(registry.status(), indent=2))
 
 
-def _ai_stub_response(tool_name: str, registry) -> list[types.TextContent]:
-    """Phase 1 stub. Every AI tool returns this until adapters land in
-    later phases. Returning a structured message rather than raising
-    keeps the tool discoverable on the MCP surface."""
+def _ai_stub_response(tool_name: str, registry, reason: str | None = None) -> list[types.TextContent]:
+    """Returned by AI tools whose adapter isn't available yet. Carries
+    enough context for the LLM to either suggest an install or pick a
+    different pipeline.
+    """
     from annotate.models import ai_extra_available
 
     msg = {
         "tool": tool_name,
         "available": False,
-        "reason": (
-            "Local-model assistance tools are scaffolded (Phase 1) but no "
-            "model adapters are registered yet. Detection/segmentation/"
-            "verification/grading adapters land in Phases 2-4."
+        "reason": reason or (
+            "Local-model assistance tools are scaffolded but the requested "
+            "capability has no adapter registered for the configured model."
         ),
         "ai_extra_installed": ai_extra_available(),
     }
@@ -745,6 +745,184 @@ def _ai_stub_response(tool_name: str, registry) -> list[types.TextContent]:
         msg["registered_adapter_prefixes"] = registry.status()["registered_adapter_prefixes"]
         msg["configured_pipelines"] = registry.status()["configured_pipelines"]
     return _text(json.dumps(msg, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: detection (open-vocab) + tiling
+# ---------------------------------------------------------------------------
+
+def _open_image(project: dict, image_registry_map: dict, fid: str):
+    """Return (PIL.Image, abs_path_str) or (None, error_text)."""
+    from PIL import Image as PILImage
+    from pathlib import Path as _Path
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return None, f"File ID {fid!r} not found."
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return None, f"Image path not available for fid={fid}."
+    p = _Path(abs_path)
+    if not p.exists():
+        return None, f"Image file not found at {abs_path}."
+    return PILImage.open(p), str(p)
+
+
+def _existing_boxes_fraction(
+    project: dict, image_registry_map: dict, fid: str,
+) -> list[tuple[float, float, float, float]]:
+    """Return existing region rect bboxes in fraction space for the given fid.
+
+    Non-rect shapes are converted to their axis-aligned bbox.
+    """
+    dims = _image_dims(project, image_registry_map, str(fid))
+    if dims is None:
+        return []
+    w, h = dims
+    if w <= 0 or h <= 0:
+        return []
+
+    view_to_fids = {
+        vid: [str(x) for x in v.get("fid_list", [])]
+        for vid, v in project.get("view", {}).items()
+    }
+    out: list[tuple[float, float, float, float]] = []
+    for _mid, m in project.get("metadata", {}).items():
+        if str(fid) not in view_to_fids.get(m.get("vid", ""), []):
+            continue
+        xy = m.get("xy") or []
+        if not xy:
+            continue
+        head = xy[0]
+        shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+        bbox = _region_bbox_orig(shape, xy[1:])
+        if bbox is None:
+            continue
+        x0, y0, x1, y1 = bbox
+        out.append((x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h))
+    return out
+
+
+def handle_suggest_regions(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    prompts: list[str] | None,
+    tiling: str = "auto",
+    exclude_existing: bool = False,
+    broad_prompts: bool = False,
+    min_confidence: float = 0.3,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+    from annotate.models.tiling import (
+        DEFAULT_BROAD_PROMPTS, CandidateBox, auto_grid, filter_existing,
+        generate_tiles, nms_merge, parse_grid,
+    )
+
+    if registry is None:
+        return _ai_stub_response(
+            "via_suggest_regions", None,
+            reason="Model registry not initialised (server started with --no-ai or init failed).",
+        )
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+    pil_image = img
+    W, H = pil_image.size
+
+    # Eager-import adapter modules so their factories are registered.
+    # Safe even without [ai] — the modules don't import torch at module load.
+    try:
+        from annotate.models import grounding_dino  # noqa: F401
+    except ImportError:
+        pass
+
+    # Resolve and load the detector
+    try:
+        # scene_class lives on the file entry once Phase 5 routing lands;
+        # for now, pass it through if present.
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("detect", "detect",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_suggest_regions", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load detector: {e}")
+
+    # Decide prompts
+    use_prompts = list(prompts or [])
+    if not use_prompts and (broad_prompts or exclude_existing):
+        use_prompts = list(DEFAULT_BROAD_PROMPTS)
+    if not use_prompts:
+        return _text("No prompts provided. Pass prompts=[...] or broad_prompts=True.")
+
+    # Decide tiling
+    mode = tiling
+    if mode == "auto":
+        mode = auto_grid(W, H)
+    if mode == "adaptive":
+        # Phase 5 — fall back to auto for now and note it in the response.
+        mode = auto_grid(W, H)
+
+    tiles = generate_tiles(W, H, mode)
+    cols, rows = parse_grid(mode if mode != "auto" else "none")
+
+    # Run detector per tile
+    all_candidates: list[CandidateBox] = []
+    for t in tiles:
+        crop = pil_image.crop((t.x, t.y, t.x + t.w, t.y + t.h)) if mode != "none" else pil_image
+        try:
+            tile_detections = adapter.detect(crop, use_prompts, min_confidence=min_confidence)
+        except Exception as e:
+            return _text(f"Detector raised on tile ({t.col},{t.row}): {e}")
+        for det in tile_detections:
+            # det.xy is fraction-of-tile in [2, x, y, w, h]; remap to image fraction
+            _, tx, ty, tw, th = det.xy
+            x_frac = (t.x + tx * t.w) / W
+            y_frac = (t.y + ty * t.h) / H
+            w_frac = (tw * t.w) / W
+            h_frac = (th * t.h) / H
+            all_candidates.append(CandidateBox(
+                x=x_frac, y=y_frac, w=w_frac, h=h_frac,
+                label=det.label, score=det.score, tile=(t.col, t.row),
+            ))
+
+    merged = nms_merge(all_candidates, iou_threshold=0.5, per_label=True)
+
+    if exclude_existing:
+        existing = _existing_boxes_fraction(project, image_registry_map, fid)
+        merged = filter_existing(merged, existing, iou_threshold=0.5)
+
+    response = {
+        "fid": fid,
+        "image_dims": [W, H],
+        "model": adapter.model_id,
+        "tile_grid": mode,
+        "tile_count": len(tiles),
+        "prompts": use_prompts,
+        "candidate_count": len(merged),
+        "candidates": [
+            {
+                "xy": c.to_xy(),
+                "label": c.label,
+                "score": round(c.score, 4),
+                "tile": list(c.tile) if c.tile else None,
+            }
+            for c in merged
+        ],
+        "notes": [],
+    }
+    if tiling == "adaptive":
+        response["notes"].append("adaptive tiling requested but not yet implemented; fell back to auto-grid")
+
+    return _text(json.dumps(response, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -1239,8 +1417,18 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_save_project(store, path=arguments["path"])
             if name == "via_model_status":
                 return handle_model_status(registry)
-            if name in ("via_suggest_regions", "via_tighten_region",
-                        "via_verify_region", "via_grade_annotations"):
+            if name == "via_suggest_regions":
+                return handle_suggest_regions(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    prompts=arguments.get("prompts"),
+                    tiling=arguments.get("tiling", "auto"),
+                    exclude_existing=bool(arguments.get("exclude_existing", False)),
+                    broad_prompts=bool(arguments.get("broad_prompts", False)),
+                    min_confidence=float(arguments.get("min_confidence", 0.3)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name in ("via_tighten_region", "via_verify_region", "via_grade_annotations"):
                 return _ai_stub_response(name, registry)
             return _text(f"Unknown tool: {name}")
         except KeyError as e:

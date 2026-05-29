@@ -131,7 +131,13 @@ class ModelRegistry:
                 f"advertise the {capability!r} capability "
                 f"(supports: {adapter.capabilities})."
             )
-        adapter.load()
+        try:
+            adapter.load()
+        except ImportError as e:
+            raise NotInstalledError(
+                f"Adapter for {cfg.model!r} needs a dep that isn't installed: {e}. "
+                f"Try: pip install 'annotate[ai]'"
+            ) from e
 
         with self._lock:
             self._loaded[cfg.key] = _LoadedEntry(adapter, time.monotonic())

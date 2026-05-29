@@ -653,6 +653,127 @@ def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
     assert len(result[1].data) > 0
 
 
+# --- Phase 2: via_suggest_regions with a mock detector adapter ---
+
+
+class _FakeDetector:
+    """Stand-in for a real adapter so the handler can be exercised without
+    torch installed. Returns a fixed set of detections regardless of prompts."""
+
+    model_id = "test/fake-detector"
+    capabilities = ("detect",)
+
+    def __init__(self, detections):
+        from annotate.models.base import Detection
+        self._detections = [Detection(**d) for d in detections]
+
+    def detect(self, image, prompts, **kwargs):
+        return list(self._detections)
+
+
+def _build_registry_with_fake(detections):
+    """Return a ModelRegistry whose acquire('detect','detect') yields _FakeDetector."""
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    fake = _FakeDetector(detections)
+    # Bypass the construct/load path — drop the fake straight into the cache
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg._loaded["detect.default"] = _LoadedEntry(fake, time.monotonic())
+    return reg
+
+
+def test_suggest_regions_no_project(store):
+    from annotate.server import handle_suggest_regions
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_suggest_regions(store, {}, reg, fid="1", prompts=["x"])
+    assert "No project" in _text(result)
+
+
+def test_suggest_regions_no_registry_returns_stub(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry: dict = {}
+    handle_add_file(store, registry, 9669, str(img_path))
+    result = handle_suggest_regions(store, registry, None, fid="1", prompts=["x"])
+    data = json.loads(_text(result))
+    assert data["available"] is False
+
+
+def test_suggest_regions_tiles_and_returns_candidates(store, tmp_path):
+    """Happy path with a mock detector: the handler should crop tiles,
+    call the detector per tile, map back to image fraction space, and
+    return merged candidates."""
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    # Detector returns one box centred on its tile, in fraction-of-tile
+    # coords. The handler should remap to fraction-of-image and dedupe via NMS.
+    reg = _build_registry_with_fake([
+        {"xy": [2, 0.25, 0.25, 0.5, 0.5], "label": "thing", "score": 0.9}
+    ])
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=["thing"], tiling="2x2",
+    )
+    data = json.loads(_text(result))
+    assert data["tile_grid"] == "2x2"
+    assert data["tile_count"] == 4
+    assert data["model"] == "test/fake-detector"
+    # 4 tiles × 1 box each → at least 1 candidate after NMS merge
+    assert data["candidate_count"] >= 1
+    for cand in data["candidates"]:
+        assert 0.0 <= cand["xy"][1] <= 1.0
+        assert cand["label"] == "thing"
+
+
+def test_suggest_regions_exclude_existing_filters_overlaps(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Pre-existing annotation covering the central region in original-pixel coords
+    handle_add_region(store, registry_map, vid="1", z=[],
+                      xy=[2, 200, 200, 600, 600], av={"label": "existing"})
+    reg = _build_registry_with_fake([
+        {"xy": [2, 0.2, 0.2, 0.6, 0.6], "label": "thing", "score": 0.9}
+    ])
+    # With exclude_existing, the detector's box (which is the same region)
+    # should be filtered out.
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=["thing"], tiling="none", exclude_existing=True,
+    )
+    data = json.loads(_text(result))
+    assert data["candidate_count"] == 0
+
+
+def test_suggest_regions_broad_prompts_uses_default_set(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.models.tiling import DEFAULT_BROAD_PROMPTS
+    from annotate.server import handle_suggest_regions
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _build_registry_with_fake([])
+    result = handle_suggest_regions(
+        store, registry_map, reg,
+        fid="1", prompts=None, tiling="none", broad_prompts=True,
+    )
+    data = json.loads(_text(result))
+    assert data["prompts"] == DEFAULT_BROAD_PROMPTS
+
+
 # --- Phase 1: local-model stub tools ---
 
 def test_model_status_with_no_registry_returns_disabled():
