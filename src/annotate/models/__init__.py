@@ -8,6 +8,7 @@ present rather than crashing at import time.
 
 from annotate.models.base import (
     Adapter,
+    Answer,
     Capability,
     Detection,
     Grade,
@@ -20,6 +21,7 @@ from annotate.models.registry import ModelRegistry, ai_extra_available
 
 __all__ = [
     "Adapter",
+    "Answer",
     "Capability",
     "Detection",
     "Grade",

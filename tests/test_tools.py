@@ -911,6 +911,158 @@ def test_grade_annotations_scores_each_region(store, tmp_path):
         assert "mock issue" in r["issues"]
 
 
+# --- Phase 6: via_ask_model + via_find_similar ---
+
+
+class _FakeAsker:
+    model_id = "test/fake-asker"
+    capabilities = ("ask",)
+
+    def __init__(self, answer_text="It is a cat."):
+        self._text = answer_text
+        self._last_question = None
+        self._last_image_size = None
+
+    def ask(self, image, question, **kwargs):
+        from annotate.models.base import Answer
+        self._last_question = question
+        self._last_image_size = image.size
+        return Answer(question=question, text=self._text,
+                      finish_reason="stop", tokens_generated=len(self._text.split()))
+
+
+class _FakeSimilarityFinder:
+    model_id = "test/fake-yoloe"
+    capabilities = ("find_similar",)
+
+    def __init__(self, detections_per_target=None):
+        self._dets = detections_per_target or []
+
+    def find_similar(self, target_image, reference_image, reference_box_pixel, **kwargs):
+        from annotate.models.base import Detection
+        return [Detection(**d) for d in self._dets]
+
+
+def _reg_with_adapter(pipeline_key, adapter):
+    """Build a registry with a fake adapter pre-cached AND a matching
+    config entry so acquire() resolves successfully."""
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.config import PipelineConfig
+    from annotate.models.registry import _LoadedEntry
+    import time
+    reg = ModelRegistry(default_config())
+    task, name = pipeline_key.split(".", 1)
+    # Ensure a pipeline config exists for the key (some defaults like
+    # find_similar.default are commented out in the embedded TOML).
+    if pipeline_key not in reg.config.pipelines:
+        reg.config.pipelines[pipeline_key] = PipelineConfig(
+            task=task, name=name, model="test/mock", device="cpu",
+        )
+    reg._loaded[pipeline_key] = _LoadedEntry(adapter, time.monotonic())
+    return reg
+
+
+def test_ask_model_empty_question_errors(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _reg_with_adapter("ask.default", _FakeAsker())
+    result = handle_ask_model(store, registry_map, reg, fid="1", question="  ")
+    assert "non-empty" in _text(result)
+
+
+def test_ask_model_full_image(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 300), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    asker = _FakeAsker(answer_text="There is a small dark image.")
+    reg = _reg_with_adapter("ask.default", asker)
+    result = handle_ask_model(store, registry_map, reg, fid="1",
+                              question="What's in this image?")
+    data = json.loads(_text(result))
+    assert data["answer"] == "There is a small dark image."
+    assert data["used_window_pixel"] == [0, 0, 400, 300]
+    assert asker._last_image_size == (400, 300)
+
+
+def test_ask_model_with_region_bbox_crops(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    asker = _FakeAsker()
+    reg = _reg_with_adapter("ask.default", asker)
+    handle_ask_model(store, registry_map, reg, fid="1",
+                     question="What is this?",
+                     region_bbox=[0.2, 0.2, 0.4, 0.4])
+    # 0.2..0.6 of 1000 = 200..600, padded by 10% of 400 → 40, so 160..640 = 480 wide
+    assert asker._last_image_size == (480, 480)
+
+
+def test_ask_model_with_metadata_id(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_ask_model
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 200, 200], av={"label": "x"})
+    mid = json.loads(_text(add))["metadata_id"]
+    asker = _FakeAsker(answer_text="It's a thing.")
+    reg = _reg_with_adapter("ask.default", asker)
+    result = handle_ask_model(store, registry_map, reg, fid="1",
+                              question="What is it?", metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["metadata_id"] == mid
+    assert data["answer"] == "It's a thing."
+
+
+def test_find_similar_unknown_mid(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_find_similar
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    reg = _reg_with_adapter("find_similar.default", _FakeSimilarityFinder())
+    result = handle_find_similar(store, registry_map, reg, metadata_id="nope")
+    assert "not found" in _text(result)
+
+
+def test_find_similar_returns_per_target_results(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_find_similar
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    add = handle_add_region(store, registry_map, vid="1", z=[],
+                            xy=[2, 100, 100, 200, 200], av={"label": "ice skater"})
+    mid = json.loads(_text(add))["metadata_id"]
+    finder = _FakeSimilarityFinder([
+        {"xy": [2, 0.4, 0.4, 0.05, 0.05], "label": "x", "score": 0.85},
+        {"xy": [2, 0.6, 0.3, 0.05, 0.05], "label": "x", "score": 0.7},
+    ])
+    reg = _reg_with_adapter("find_similar.default", finder)
+    result = handle_find_similar(store, registry_map, reg, metadata_id=mid)
+    data = json.loads(_text(result))
+    assert data["reference_label"] == "ice skater"
+    assert len(data["results"]) == 1
+    assert data["results"][0]["candidate_count"] == 2
+    # Reference label should be propagated onto similar candidates
+    for c in data["results"][0]["candidates"]:
+        assert c["label"] == "ice skater"
+
+
 # --- Phase 5: scene classifier, routing, adaptive tiling ---
 
 

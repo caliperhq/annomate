@@ -1324,6 +1324,201 @@ def _explain_routing(cfg, scene_class: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phase 6: ask_model + find_similar
+# ---------------------------------------------------------------------------
+
+def handle_ask_model(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    question: str,
+    region_bbox: list | None = None,
+    xy_space: str = "fraction",
+    metadata_id: str | None = None,
+    max_new_tokens: int = 256,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    """Free-form Q&A about an image (or a region of one).
+
+    Either pass ``region_bbox=[x, y, w, h]`` (fraction or original-pixel
+    per ``xy_space``) or ``metadata_id=`` to use an existing region's
+    bbox. Omit both to ask about the full image.
+    """
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_ask_model", None,
+                                 reason="Model registry not initialised.")
+    if not question or not question.strip():
+        return _text("Pass a non-empty 'question'.")
+
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+    W, H = img.size
+
+    crop_window = None
+    if metadata_id is not None:
+        region = project.get("metadata", {}).get(metadata_id)
+        if region is None:
+            return _text(f"metadata_id {metadata_id!r} not found.")
+        xy = region.get("xy") or []
+        head = xy[0] if xy else 0
+        shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+        bbox = _region_bbox_orig(shape, xy[1:])
+        if bbox is None:
+            return _text(f"Region {metadata_id!r} has unsupported shape for crop.")
+        crop_window = bbox
+    elif region_bbox is not None:
+        if len(region_bbox) != 4:
+            return _text("region_bbox must be [x, y, w, h]")
+        x, y, w, h = region_bbox
+        if xy_space == "fraction":
+            x, w = x * W, w * W
+            y, h = y * H, h * H
+        elif xy_space != "original":
+            return _text(f"xy_space must be 'fraction' or 'original', got {xy_space!r}")
+        crop_window = (int(x), int(y), int(x + w), int(y + h))
+
+    if crop_window is not None:
+        x0, y0, x1, y1 = crop_window
+        pad_x = max(8, int((x1 - x0) * 0.1))
+        pad_y = max(8, int((y1 - y0) * 0.1))
+        cx0 = max(0, x0 - pad_x); cy0 = max(0, y0 - pad_y)
+        cx1 = min(W, x1 + pad_x); cy1 = min(H, y1 + pad_y)
+        target = img.crop((cx0, cy0, cx1, cy1))
+        used_window_pixel = [cx0, cy0, cx1 - cx0, cy1 - cy0]
+    else:
+        target = img
+        used_window_pixel = [0, 0, W, H]
+
+    try:
+        from annotate.models import chat_vlm  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        scene_class = (project.get("file", {}).get(str(fid)) or {}).get("scene_class")
+        adapter = registry.acquire("ask", "ask",
+                                   scene_class=scene_class, pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_ask_model", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load chat VLM: {e}")
+
+    try:
+        answer = adapter.ask(target, question, max_new_tokens=max_new_tokens)
+    except Exception as e:
+        return _text(f"Chat VLM raised: {e}")
+
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "question": answer.question,
+        "answer": answer.text,
+        "finish_reason": answer.finish_reason,
+        "tokens_generated": answer.tokens_generated,
+        "used_window_pixel": used_window_pixel,
+    }
+    if metadata_id:
+        response["metadata_id"] = metadata_id
+    return _text(json.dumps(response, indent=2))
+
+
+def handle_find_similar(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    metadata_id: str,
+    target_fids: list[str] | None = None,
+    min_confidence: float = 0.3,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    """Use a labelled region as a visual prompt; return similar regions
+    from each target image. If ``target_fids`` is omitted, searches the
+    reference's own image."""
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_find_similar", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    ref_region = project.get("metadata", {}).get(metadata_id)
+    if ref_region is None:
+        return _text(f"metadata_id {metadata_id!r} not found.")
+    ref_vid = ref_region.get("vid")
+    ref_fid = _resolve_fid_for_vid(project, ref_vid) if ref_vid else None
+    if ref_fid is None:
+        return _text(f"Could not resolve fid for reference region {metadata_id!r}.")
+    ref_img, err = _open_image(project, image_registry_map, ref_fid)
+    if ref_img is None:
+        return _text(err)
+
+    xy = ref_region.get("xy") or []
+    head = xy[0] if xy else 0
+    shape = int(head) if isinstance(head, (int, float)) and head == int(head) else 0
+    ref_bbox = _region_bbox_orig(shape, xy[1:])
+    if ref_bbox is None:
+        return _text(f"Reference region {metadata_id!r} has unsupported shape.")
+
+    targets = target_fids if target_fids else [ref_fid]
+    # Resolve all target images up front
+    target_images = {}
+    for tfid in targets:
+        timg, terr = _open_image(project, image_registry_map, tfid)
+        if timg is None:
+            return _text(f"fid={tfid}: {terr}")
+        target_images[tfid] = timg
+
+    try:
+        from annotate.models import yoloe  # noqa: F401
+    except ImportError:
+        pass
+
+    try:
+        adapter = registry.acquire("find_similar", "find_similar", pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_find_similar", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load find_similar adapter: {e}")
+
+    ref_label = (ref_region.get("av") or {}).get("1", "")
+    all_results = []
+    for tfid, timg in target_images.items():
+        try:
+            detections = adapter.find_similar(
+                timg, ref_img, ref_bbox, min_confidence=min_confidence,
+            )
+        except Exception as e:
+            return _text(f"find_similar raised on fid={tfid}: {e}")
+        all_results.append({
+            "fid": tfid,
+            "candidate_count": len(detections),
+            "candidates": [
+                {"xy": d.xy, "score": round(d.score, 4), "label": ref_label or d.label}
+                for d in detections
+            ],
+        })
+
+    response = {
+        "reference_mid": metadata_id,
+        "reference_label": ref_label,
+        "reference_fid": ref_fid,
+        "model": adapter.model_id,
+        "results": all_results,
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # main() and async MCP runner
 # ---------------------------------------------------------------------------
 
@@ -1756,6 +1951,72 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_ask_model",
+                description=(
+                    "[Phase 6] Ask a local chat VLM a free-form question "
+                    "about an image (or a specific region). Use for things "
+                    "structured tools don't cover: 'how many people are "
+                    "wearing red?', 'what's the make of this car?', 'read "
+                    "the text on this label', 'describe the lighting'. "
+                    "Pass region_bbox=[x,y,w,h] (defaults to fraction "
+                    "space) OR metadata_id=<mid> to crop to a region; "
+                    "omit both to ask about the full image. Default model: "
+                    "Qwen2.5-VL-3B (Apache 2.0)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "question": {"type": "string"},
+                        "region_bbox": {
+                            "type": "array", "items": {"type": "number"},
+                            "minItems": 4, "maxItems": 4,
+                            "description": "[x, y, w, h] in xy_space coords",
+                        },
+                        "xy_space": {
+                            "type": "string", "enum": ["fraction", "original"],
+                            "default": "fraction",
+                        },
+                        "metadata_id": {
+                            "type": "string",
+                            "description": "Use an existing region's bbox as the crop",
+                        },
+                        "max_new_tokens": {"type": "integer", "default": 256},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid", "question"],
+                },
+            ),
+            types.Tool(
+                name="via_find_similar",
+                description=(
+                    "[Phase 6] Use one annotated region as a visual prompt "
+                    "and find similar regions in the same image or across "
+                    "other images in the project. The killer feature for "
+                    "dense scenes: annotate one ice skater, find all of "
+                    "them. Requires the YOLOE pipeline (AGPL-3.0) to be "
+                    "configured under [find_similar.default] in "
+                    "models.toml — see the design doc for the license "
+                    "note."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {
+                            "type": "string",
+                            "description": "Reference region whose visual content drives the search",
+                        },
+                        "target_fids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Files to search (omit = just the reference's own image)",
+                        },
+                        "min_confidence": {"type": "number", "default": 0.3},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
                 name="via_grade_annotations",
                 description=(
                     "[Phase 3] Score every region (or a specified subset) on "
@@ -1877,6 +2138,25 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     fid=arguments["fid"],
                     labels=arguments.get("labels"),
                     cache=bool(arguments.get("cache", True)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_ask_model":
+                return handle_ask_model(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    question=arguments["question"],
+                    region_bbox=arguments.get("region_bbox"),
+                    xy_space=arguments.get("xy_space", "fraction"),
+                    metadata_id=arguments.get("metadata_id"),
+                    max_new_tokens=int(arguments.get("max_new_tokens", 256)),
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_find_similar":
+                return handle_find_similar(
+                    store, image_registry, registry,
+                    metadata_id=arguments["metadata_id"],
+                    target_fids=arguments.get("target_fids"),
+                    min_confidence=float(arguments.get("min_confidence", 0.3)),
                     pipeline=arguments.get("pipeline"),
                 )
             return _text(f"Unknown tool: {name}")

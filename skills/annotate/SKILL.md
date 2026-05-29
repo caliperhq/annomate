@@ -71,10 +71,21 @@ If you're not sure which kind of image you have, start with a small batch.
 | "Does this region really show what I labelled?" | `via_verify_region` |
 | Score every region for position / size / label match | `via_grade_annotations` |
 | Classify the scene (cached → auto-routes other tools) | `via_classify_scene` |
+| Ask the local VLM a free-form question | `via_ask_model` |
+| "Find more things that look like this one" | `via_find_similar` |
 
 The AI tools are advertised even when the `[ai]` extra isn't installed —
 they return a structured `install_hint` rather than erroring. Call
 `via_model_status` to see what's available before relying on them.
+
+Most AI tools default to the `detect.default` (GroundingDINO),
+`segment.default` (SAM 2 tiny), `verify.default` (Florence-2),
+`grade.default` (CLIP), `classify.default` (CLIP), and `ask.default`
+(Qwen2.5-VL-3B) pipelines. Override per call via `pipeline=`. The
+`detect.fast` pipeline (YOLO-World, needs `[yolo]` extra) is an
+order-of-magnitude faster than the default on CPU; swap to it via
+`via_suggest_regions(..., pipeline="fast")` when latency matters more
+than absolute precision.
 
 Prefer `via_get_annotations` over `via_get_project` for reads — it returns only
 metadata, not the full project blob. After the user corrects placements in the
@@ -534,6 +545,30 @@ calls automatically route to the pipeline configured for that scene.
 Run once at the start of a session on each new file; it costs
 sub-second and influences every downstream call.
 
+**`via_ask_model(fid, question, ...)`** — free-form Q&A. Routes to a
+chat-capable VLM (default: Qwen2.5-VL-3B). Use for questions that
+don't fit the structured tools above:
+- "How many people are wearing red shirts?"
+- "What's the make and model of this car?"
+- "Read the text on this label."
+- "What's the dominant lighting direction?"
+- "Is the door open or closed?"
+
+Pass `region_bbox=[x, y, w, h]` (default xy_space is `fraction`) **or**
+`metadata_id=<mid>` to ask about a specific region; omit both to ask
+about the whole image. The answer is whatever the model writes — read
+it the way you'd read any other LLM response, and treat its claims as
+hints to verify against the pixels, not gospel.
+
+**`via_find_similar(metadata_id, target_fids=None)`** — visual-prompt
+one-shot detection. Takes an annotated region as the example; finds
+similar regions in the same image (default) or across a list of other
+images. Killer feature for dense scenes: annotate one ice skater, find
+all the others; annotate one bolt-head, find every bolt on the
+assembly. Requires the YOLOE pipeline (AGPL-3.0) to be enabled in
+models.toml — see the model registry config notes if you want this
+capability.
+
 ### Typical AI-assisted flow
 
 For a new dense image:
@@ -610,6 +645,22 @@ read the supporting/contradicting text and decide.
 **"What models are available?"** / **"Why isn't the AI doing anything?"**
 → `via_model_status`. Reports whether the `[ai]` extra is installed,
 configured pipelines, currently loaded adapters, memory use.
+
+**"Annotate one X, find all the others"** (one-shot detection)
+→ Annotate one example via `via_add_region`, then
+`via_find_similar(metadata_id=...)`. Returns candidate boxes for every
+similar object found.
+
+**"What does this image / region actually look like?"** (free-form)
+→ `via_ask_model(fid, question="describe this in detail")` for the
+whole image, or with `metadata_id=<mid>` / `region_bbox=[...]` for a
+specific area. Use when the structured tools (verify, grade) don't
+cover what you need to know.
+
+**"Detection is too slow / I just need rough boxes fast"**
+→ `via_suggest_regions(..., pipeline="fast")` if `[yolo]` is installed
+and `detect.fast` is configured. YOLO-World is ~10× faster than the
+GroundingDINO default on CPU.
 
 **"Re-annotate everything based on..."**
 → `via_update_project` with the full modified project JSON

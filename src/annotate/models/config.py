@@ -40,6 +40,12 @@ device = "auto"
 model = "google/owlv2-large-patch14-ensemble"
 device = "auto"
 
+# YOLO-World — Apache 2.0, ~10x faster than GroundingDINO on CPU.
+# Needs the [yolo] extra: pip install 'annotate[yolo]'.
+[detect.fast]
+model = "ultralytics:yolov8s-worldv2"
+device = "auto"
+
 # ---- segmentation (promptable, for region tightening) ----
 [segment.default]
 model = "facebook/sam2-hiera-tiny"
@@ -47,6 +53,26 @@ device = "auto"
 
 [segment.high_quality]
 model = "facebook/sam2-hiera-base-plus"
+device = "auto"
+
+# YOLOE native instance segmentation — AGPL-3.0, opt-in.
+# [segment.yoloe]
+# model = "ultralytics:yoloe-11s-seg"
+# device = "auto"
+
+# ---- visual-prompt one-shot detection (YOLOE) ----
+# AGPL-3.0; commented out by default. Uncomment to enable via_find_similar.
+# [find_similar.default]
+# model = "ultralytics:yoloe-11s-seg"
+# device = "auto"
+
+# ---- free-form Q&A about images (chat VLM) ----
+# Needs the [ai] + [chat] extras: pip install 'annotate[ai,chat]'.
+# Default is Qwen2.5-VL-3B (~6 GB on disk, Apache 2.0). Smaller picks:
+#   HuggingFaceTB/SmolVLM-Instruct   (~2 GB)
+#   HuggingFaceTB/SmolVLM-256M-Instruct  (~500 MB, weaker)
+[ask.default]
+model = "Qwen/Qwen2.5-VL-3B-Instruct"
 device = "auto"
 
 # ---- verification (VLM crop-and-verify) ----
@@ -133,7 +159,8 @@ class ModelsConfig:
 
 
 # Task keys that map to top-level TOML tables.
-_TASK_TABLES = ("detect", "segment", "verify", "grade", "classify", "saliency")
+_TASK_TABLES = ("detect", "segment", "verify", "grade", "classify",
+                "saliency", "ask", "find_similar")
 
 
 def default_config_path() -> Path:

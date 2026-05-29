@@ -24,7 +24,11 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 
-Capability = Literal["detect", "segment", "verify", "grade", "classify", "saliency"]
+Capability = Literal[
+    "detect", "segment", "verify", "grade", "classify", "saliency",
+    "ask",             # free-form Q&A (chat VLM)
+    "find_similar",    # one-shot visual-prompt detection (YOLOE)
+]
 
 
 class NotInstalledError(RuntimeError):
@@ -70,6 +74,15 @@ class Grade:
     label_match: float
     shape_encoding_fit: Literal["good", "marginal", "wrong"]
     issues: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Answer:
+    """Free-form VLM answer to a question about an image (or region of one)."""
+    question: str
+    text: str
+    finish_reason: str = "stop"
+    tokens_generated: int | None = None
 
 
 class Adapter(ABC):
