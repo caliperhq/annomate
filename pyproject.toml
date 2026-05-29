@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "annomate"
-version = "0.1.0-dev"
+name = "annomate-mcp"
+version = "0.1.0"
 description = "MCP server for VIA v3 — lets Claude read and write image annotations in real time"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -63,6 +63,7 @@ ocr = [
 annomate = "annomate.server:main"
 
 [project.urls]
+Homepage = "https://github.com/caliperhq/annomate"
 Repository = "https://github.com/caliperhq/annomate"
 
 [tool.setuptools.packages.find]
