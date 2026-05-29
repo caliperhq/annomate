@@ -30,34 +30,31 @@ instead of erroring.
 
 ### Base (annotation server only)
 
-`annomate` is not on PyPI — install from GitHub:
-
 ```bash
 python -m venv ~/.local/annomate
-~/.local/annomate/bin/pip install \
-  'annomate @ git+https://github.com/caliperhq/annomate.git'
+~/.local/annomate/bin/pip install annomate-mcp
 ```
 
 ### Pick the extras you want
 
 ```bash
 # Local AI models (~3 GB on disk, lazy-downloaded on first use)
-pip install 'annomate[ai] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[ai]'
 
 # Faster detection (YOLO-World, ~95 MB)
-pip install 'annomate[ai,yolo] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[ai,yolo]'
 
 # Free-form Q&A via chat VLM (Qwen2.5-VL-3B, ~6 GB)
-pip install 'annomate[ai,chat] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[ai,chat]'
 
 # Format conversion (HEIC, PDF) + EXIF metadata
-pip install 'annomate[io] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[io]'
 
 # OCR via Tesseract
-pip install 'annomate[ocr] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[ocr]'
 
 # Everything
-pip install 'annomate[ai,yolo,chat,io,ocr] @ git+https://github.com/caliperhq/annomate.git'
+pip install 'annomate-mcp[ai,yolo,chat,io,ocr]'
 ```
 
 ## System packages
