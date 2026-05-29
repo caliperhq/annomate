@@ -709,6 +709,45 @@ def handle_save_project(store: ProjectStore, path: str) -> list[types.TextConten
 
 
 # ---------------------------------------------------------------------------
+# Local-model assistance (Phase 1 — registry + stub tools, no weights yet)
+# ---------------------------------------------------------------------------
+
+def handle_model_status(registry) -> list[types.TextContent]:
+    if registry is None:
+        return _text(json.dumps({
+            "ai_extra_available": False,
+            "loaded": [],
+            "configured_pipelines": [],
+            "hint": "Local-model assistance is disabled. Install with: pip install 'annotate[ai]'",
+        }, indent=2))
+    return _text(json.dumps(registry.status(), indent=2))
+
+
+def _ai_stub_response(tool_name: str, registry) -> list[types.TextContent]:
+    """Phase 1 stub. Every AI tool returns this until adapters land in
+    later phases. Returning a structured message rather than raising
+    keeps the tool discoverable on the MCP surface."""
+    from annotate.models import ai_extra_available
+
+    msg = {
+        "tool": tool_name,
+        "available": False,
+        "reason": (
+            "Local-model assistance tools are scaffolded (Phase 1) but no "
+            "model adapters are registered yet. Detection/segmentation/"
+            "verification/grading adapters land in Phases 2-4."
+        ),
+        "ai_extra_installed": ai_extra_available(),
+    }
+    if not msg["ai_extra_installed"]:
+        msg["install_hint"] = "pip install 'annotate[ai]'"
+    if registry is not None:
+        msg["registered_adapter_prefixes"] = registry.status()["registered_adapter_prefixes"]
+        msg["configured_pipelines"] = registry.status()["configured_pipelines"]
+    return _text(json.dumps(msg, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # main() and async MCP runner
 # ---------------------------------------------------------------------------
 
@@ -731,6 +770,17 @@ def main():
         "--browser",
         action="store_true",
         help="Open browser on startup",
+    )
+    parser.add_argument(
+        "--models-config",
+        default=os.environ.get("ANNOTATE_MODELS_CONFIG"),
+        help="Path to models.toml (env: ANNOTATE_MODELS_CONFIG; "
+             "default: ~/.config/annotate/models.toml, auto-generated on first run)",
+    )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Skip building the model registry (AI tools return install hint)",
     )
     args = parser.parse_args()
 
@@ -812,10 +862,25 @@ def main():
     if args.browser:
         webbrowser.open(annotator_url)
 
-    asyncio.run(_run_mcp(store, annotator_url, actual_port, image_registry))
+    registry = None
+    if not args.no_ai:
+        try:
+            from annotate.models import ModelRegistry, load_config
+            registry = ModelRegistry(load_config(args.models_config))
+            print(
+                f"annotate: model registry loaded "
+                f"({len(registry.config.pipelines)} pipelines from "
+                f"{registry.config.source_path or 'builtin defaults'})",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"annotate: model registry init failed ({e}); AI tools disabled", file=sys.stderr)
+            registry = None
+
+    asyncio.run(_run_mcp(store, annotator_url, actual_port, image_registry, registry))
 
 
-async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict) -> None:
+async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict, registry=None) -> None:
     mcp_server = mcp.server.Server("annotate")
 
     @mcp_server.list_tools()
@@ -1010,6 +1075,108 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     "required": ["path"],
                 },
             ),
+            # --- Local-model assistance (Phase 1 stubs; adapters land in 2-4) ---
+            types.Tool(
+                name="via_model_status",
+                description=(
+                    "Report the local-model assistance state: whether the [ai] "
+                    "extra is installed, which model pipelines are configured, "
+                    "which are currently loaded in memory, and the registered "
+                    "adapter prefixes."
+                ),
+                inputSchema={"type": "object", "properties": {}, "required": []},
+            ),
+            types.Tool(
+                name="via_suggest_regions",
+                description=(
+                    "[Phase 2] Open-vocabulary detection: given text prompts, "
+                    "return candidate regions with confidences. With "
+                    "exclude_existing=True, subtracts anything already covered "
+                    "by current annotations (find-missing mode). Tiling modes: "
+                    "none | 2x2 | 4x4 | 8x8 | auto | adaptive. Returns "
+                    "candidates only — nothing is written to the project."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "prompts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Text prompts; omit/empty + broad_prompts=True uses default broad set",
+                        },
+                        "tiling": {
+                            "type": "string",
+                            "enum": ["none", "2x2", "4x4", "8x8", "16x16", "auto", "adaptive"],
+                            "default": "auto",
+                        },
+                        "exclude_existing": {"type": "boolean", "default": False},
+                        "broad_prompts": {"type": "boolean", "default": False},
+                        "min_confidence": {"type": "number", "default": 0.3},
+                        "pipeline": {"type": "string", "description": "Override the default pipeline"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
+                name="via_tighten_region",
+                description=(
+                    "[Phase 3] Use SAM-style promptable segmentation to tighten "
+                    "an existing region's box to the actual object outline. "
+                    "Returns the original box, the tightened box, IoU between "
+                    "them, and mask area. Does not write unless auto_apply=True."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {"type": "string"},
+                        "auto_apply": {"type": "boolean", "default": False},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
+                name="via_verify_region",
+                description=(
+                    "[Phase 4] Crop-and-verify with a VLM. Asks 'is this a "
+                    "{label}? what supports / contradicts that?' and returns a "
+                    "structured verdict with confidence, supporting features, "
+                    "contradicting features, and a suggested re-label if the "
+                    "model disagrees."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "metadata_id": {"type": "string"},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["metadata_id"],
+                },
+            ),
+            types.Tool(
+                name="via_grade_annotations",
+                description=(
+                    "[Phase 3] Score every region (or a specified subset) on "
+                    "position accuracy, size/extent, label-content match, and "
+                    "shape-encoding choice. Returns per-region scores plus "
+                    "issue notes; flagged regions are surfaced for review. "
+                    "Does not modify the project."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "mids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Region IDs to grade (omit for all on the file)",
+                        },
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
         ]
 
     @mcp_server.call_tool()
@@ -1070,6 +1237,11 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_save_project":
                 return handle_save_project(store, path=arguments["path"])
+            if name == "via_model_status":
+                return handle_model_status(registry)
+            if name in ("via_suggest_regions", "via_tighten_region",
+                        "via_verify_region", "via_grade_annotations"):
+                return _ai_stub_response(name, registry)
             return _text(f"Unknown tool: {name}")
         except KeyError as e:
             return _text(f"Missing required argument: {e}")

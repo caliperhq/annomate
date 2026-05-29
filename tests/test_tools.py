@@ -653,6 +653,38 @@ def test_get_image_crop_overlay_draws_region_inside_window(store, tmp_path):
     assert len(result[1].data) > 0
 
 
+# --- Phase 1: local-model stub tools ---
+
+def test_model_status_with_no_registry_returns_disabled():
+    from annotate.server import handle_model_status
+    result = handle_model_status(None)
+    data = json.loads(_text(result))
+    assert data["ai_extra_available"] is False
+    assert data["loaded"] == []
+    assert "install" in data["hint"].lower()
+
+
+def test_model_status_with_registry_returns_snapshot():
+    from annotate.server import handle_model_status
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_model_status(reg)
+    data = json.loads(_text(result))
+    assert "configured_pipelines" in data
+    assert "detect.default" in data["configured_pipelines"]
+
+
+def test_ai_stub_response_advertises_install_hint_when_extra_missing():
+    from annotate.server import _ai_stub_response
+    result = _ai_stub_response("via_suggest_regions", None)
+    data = json.loads(_text(result))
+    assert data["tool"] == "via_suggest_regions"
+    assert data["available"] is False
+    # When extra is missing, an install hint should appear
+    if not data.get("ai_extra_installed"):
+        assert "annotate[ai]" in data["install_hint"]
+
+
 def test_get_image_crop_overlay_skips_off_crop_regions(store, tmp_path):
     """Regression for the phantom-label bug (12-vermeer): a region whose box is
     entirely outside the crop window must not render a label at the clamped

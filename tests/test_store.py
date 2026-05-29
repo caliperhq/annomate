@@ -132,6 +132,28 @@ def test_update_from_browser_leaves_valid_shape_prefix_alone(store):
     assert store.get()["metadata"]["rect"]["xy"] == [2, 10, 20, 30, 40]
 
 
+def test_custom_file_entry_fields_survive_round_trip(store):
+    """Phase-1 prerequisite for local-model assistance: a custom field on a
+    file entry (e.g. scene_class) added by the server / by an LLM tool must
+    survive a browser push/pull round-trip. abs_path already does this in
+    practice, but explicit coverage for new fields.
+    """
+    proj = _minimal_project()
+    proj["file"]["1"]["scene_class"] = "painting"
+    proj["file"]["1"]["scene_class_confidence"] = 0.83
+    result = store.create(proj)
+    pid, rev = result["pid"], result["rev"]
+
+    # round-trip via update_from_browser, mimicking VIA's behaviour of
+    # serialising the whole project back and forth
+    payload = store.get()
+    store.update_from_browser(pid, rev, payload)
+
+    persisted = store.get()["file"]["1"]
+    assert persisted["scene_class"] == "painting"
+    assert persisted["scene_class_confidence"] == 0.83
+
+
 def test_set_project_bumps_revision(store):
     store.create(_minimal_project())
     project = store.get()
