@@ -865,13 +865,17 @@ def handle_suggest_regions(
 
     # Decide tiling
     mode = tiling
+    tiles = None
+    notes: list[str] = []
     if mode == "auto":
         mode = auto_grid(W, H)
     if mode == "adaptive":
-        # Phase 5 — fall back to auto for now and note it in the response.
-        mode = auto_grid(W, H)
-
-    tiles = generate_tiles(W, H, mode)
+        tiles = _adaptive_tiles(pil_image, registry, notes)
+        if tiles is None:
+            mode = auto_grid(W, H)
+            notes.append(f"saliency unavailable; fell back to {mode}")
+    if tiles is None:
+        tiles = generate_tiles(W, H, mode)
     cols, rows = parse_grid(mode if mode != "auto" else "none")
 
     # Run detector per tile
@@ -917,12 +921,39 @@ def handle_suggest_regions(
             }
             for c in merged
         ],
-        "notes": [],
+        "notes": notes,
     }
-    if tiling == "adaptive":
-        response["notes"].append("adaptive tiling requested but not yet implemented; fell back to auto-grid")
 
     return _text(json.dumps(response, indent=2))
+
+
+def _adaptive_tiles(image, registry, notes: list):
+    """Try to build a saliency-driven tile set. Returns None on failure
+    (caller falls back to auto-grid)."""
+    from annotate.models import NotInstalledError
+    try:
+        from annotate.models import saliency as _saliency_mod  # noqa: F401
+    except ImportError:
+        return None
+    try:
+        adapter = registry.acquire("saliency", "saliency")
+    except NotInstalledError as e:
+        notes.append(f"saliency adapter unavailable: {e}")
+        return None
+    except Exception as e:
+        notes.append(f"saliency load failed: {e}")
+        return None
+    try:
+        sal_map = adapter.saliency(image)
+        tiles = _saliency_mod.cluster_to_tiles(sal_map, max_tiles=8)
+    except Exception as e:
+        notes.append(f"saliency clustering failed: {e}")
+        return None
+    if not tiles:
+        notes.append("saliency produced no clusters; using uniform grid")
+        return None
+    notes.append(f"adaptive tiling placed {len(tiles)} salience-focused tiles")
+    return tiles
 
 
 # ---------------------------------------------------------------------------
@@ -1205,6 +1236,91 @@ def handle_verify_region(
         "crop_window_pixel": [cx0, cy0, cx1 - cx0, cy1 - cy0],
     }
     return _text(json.dumps(response, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: scene classification + automatic routing
+# ---------------------------------------------------------------------------
+
+def handle_classify_scene(
+    store: ProjectStore,
+    image_registry_map: dict,
+    registry,
+    *,
+    fid: str,
+    labels: list[str] | None = None,
+    cache: bool = True,
+    pipeline: str | None = None,
+) -> list[types.TextContent]:
+    from annotate.models import NotInstalledError
+
+    if registry is None:
+        return _ai_stub_response("via_classify_scene", None,
+                                 reason="Model registry not initialised.")
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    img, err_or_path = _open_image(project, image_registry_map, fid)
+    if img is None:
+        return _text(err_or_path)
+
+    # Eager-import classifier adapters (CLIP serves classify + grade).
+    try:
+        from annotate.models import clip_grader  # noqa: F401
+    except ImportError:
+        pass
+
+    cfg = registry.config.pipeline_for("classify", override=pipeline)
+    if cfg is None:
+        return _text("No classify pipeline configured.")
+    candidate_labels = labels or cfg.extra.get("labels") or []
+    if not candidate_labels:
+        return _text("No candidate labels: pass labels=[...] or add a labels= list under [classify.default] in models.toml.")
+
+    try:
+        adapter = registry.acquire("classify", "classify", pipeline=pipeline)
+    except NotInstalledError as e:
+        return _ai_stub_response("via_classify_scene", registry, reason=str(e))
+    except Exception as e:
+        return _text(f"Failed to load classifier: {e}")
+
+    try:
+        scores = adapter.classify(img, candidate_labels)
+    except Exception as e:
+        return _text(f"Classifier raised: {e}")
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_label, top_score = ranked[0]
+
+    cached = False
+    if cache:
+        # Persist on the file entry so subsequent detection/segment calls
+        # can route via registry.acquire(scene_class=...).
+        project["file"][str(fid)]["scene_class"] = top_label
+        project["file"][str(fid)]["scene_class_confidence"] = round(top_score, 4)
+        store.set_project(project)
+        cached = True
+
+    response = {
+        "fid": fid,
+        "model": adapter.model_id,
+        "scene_class": top_label,
+        "confidence": round(top_score, 4),
+        "all_scores": {k: round(v, 4) for k, v in ranked},
+        "cached_on_file_entry": cached,
+        "routing_effect": _explain_routing(registry.config, top_label),
+    }
+    return _text(json.dumps(response, indent=2))
+
+
+def _explain_routing(cfg, scene_class: str) -> dict:
+    """Surface which pipelines this scene class would route to."""
+    rules = cfg.routing.get(scene_class, {})
+    out = {}
+    for task in ("detect", "segment", "verify", "grade"):
+        chosen = rules.get(task, "default")
+        out[task] = f"{task}.{chosen}"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1615,6 +1731,31 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_classify_scene",
+                description=(
+                    "[Phase 5] Run zero-shot scene classification on the image. "
+                    "Returns the top scene class (e.g. dense_crowd, painting, "
+                    "aerial_or_satellite) plus all candidate scores. With "
+                    "cache=True (default), the result is persisted on the file "
+                    "entry as scene_class, so subsequent detection / segment / "
+                    "grade / verify calls automatically route to the pipeline "
+                    "mapped under [routing] in models.toml."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                        "labels": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Override the default label set from models.toml",
+                        },
+                        "cache": {"type": "boolean", "default": True},
+                        "pipeline": {"type": "string"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
                 name="via_grade_annotations",
                 description=(
                     "[Phase 3] Score every region (or a specified subset) on "
@@ -1728,6 +1869,14 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_verify_region(
                     store, image_registry, registry,
                     metadata_id=arguments["metadata_id"],
+                    pipeline=arguments.get("pipeline"),
+                )
+            if name == "via_classify_scene":
+                return handle_classify_scene(
+                    store, image_registry, registry,
+                    fid=arguments["fid"],
+                    labels=arguments.get("labels"),
+                    cache=bool(arguments.get("cache", True)),
                     pipeline=arguments.get("pipeline"),
                 )
             return _text(f"Unknown tool: {name}")

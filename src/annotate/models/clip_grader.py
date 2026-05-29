@@ -38,7 +38,9 @@ if TYPE_CHECKING:
 
 
 class ClipGraderAdapter(Adapter):
-    capabilities = ("grade",)
+    """Multi-purpose CLIP adapter: grading rubric + zero-shot classification."""
+
+    capabilities = ("grade", "classify")
     weights_mb_estimate = 350
 
     def __init__(self, model_id: str, device: str = "auto", **kwargs):
@@ -164,6 +166,24 @@ class ClipGraderAdapter(Adapter):
             shape_encoding_fit=shape_fit,
             issues=issues,
         )
+
+    def classify(self, image: "PILImage", candidate_labels: list[str]) -> dict[str, float]:
+        """Zero-shot scene classification. Returns label → softmax probability."""
+        if not self._loaded:
+            self.load()
+        if not candidate_labels:
+            return {}
+        torch = self._torch
+        inputs = self._processor(
+            text=candidate_labels, images=image, return_tensors="pt", padding=True,
+        )
+        inputs = {k: (v.to(self._resolved_device) if hasattr(v, "to") else v)
+                  for k, v in inputs.items()}
+        with torch.no_grad():
+            out = self._model(**inputs)
+        # logits_per_image: [1, N_labels]
+        probs = out.logits_per_image.softmax(dim=-1).cpu().squeeze(0).tolist()
+        return {label: float(p) for label, p in zip(candidate_labels, probs)}
 
     # ----- internals -----
 

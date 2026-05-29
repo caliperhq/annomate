@@ -911,6 +911,127 @@ def test_grade_annotations_scores_each_region(store, tmp_path):
         assert "mock issue" in r["issues"]
 
 
+# --- Phase 5: scene classifier, routing, adaptive tiling ---
+
+
+class _FakeClassifier:
+    model_id = "test/fake-classifier"
+    capabilities = ("classify",)
+
+    def __init__(self, scores):
+        self._scores = scores  # dict[str, float]
+
+    def classify(self, image, candidate_labels):
+        return {lab: self._scores.get(lab, 0.0) for lab in candidate_labels}
+
+
+def test_classify_scene_persists_top_label(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_classify_scene
+    from annotate.models import ModelRegistry, default_config
+    from annotate.models.registry import _LoadedEntry
+    import time
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+
+    fake = _FakeClassifier({"dense_crowd": 0.7, "painting": 0.2, "landscape": 0.1})
+    reg = ModelRegistry(default_config())
+    reg._loaded["classify.default"] = _LoadedEntry(fake, time.monotonic())
+    result = handle_classify_scene(store, registry_map, reg, fid="1")
+    data = json.loads(_text(result))
+    assert data["scene_class"] == "dense_crowd"
+    assert data["cached_on_file_entry"] is True
+    # Persisted on the file entry
+    file_entry = store.get()["file"]["1"]
+    assert file_entry["scene_class"] == "dense_crowd"
+    assert file_entry["scene_class_confidence"] == pytest.approx(0.7, abs=1e-4)
+    # Routing effect uses the default routing in the embedded config
+    assert data["routing_effect"]["detect"] == "detect.dense_scene"
+
+
+def test_classify_scene_no_labels_errors(store, tmp_path):
+    from PIL import Image as PILImage
+    from annotate.server import handle_classify_scene
+    from annotate.models.config import _parse
+    from annotate.models import ModelRegistry
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    # Build a registry whose classify.default has NO labels
+    cfg = _parse(tomllib.loads('[classify.default]\nmodel = "x/y"\n'))
+    reg = ModelRegistry(cfg)
+    result = handle_classify_scene(store, registry_map, reg, fid="1")
+    assert "No candidate labels" in _text(result)
+
+
+def test_routing_passes_scene_class_to_detector(store, tmp_path):
+    """End-to-end routing: a file with scene_class='dense_crowd' should
+    cause the detect handler to ask for pipeline 'dense_scene' (not 'default').
+    """
+    from PIL import Image as PILImage
+    from annotate.server import handle_suggest_regions
+    from annotate.models import ModelRegistry, default_config
+    img_path = tmp_path / "i.jpg"
+    PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
+    registry_map: dict = {}
+    handle_add_file(store, registry_map, 9669, str(img_path))
+    project = store.get()
+    project["file"]["1"]["scene_class"] = "dense_crowd"
+    store.set_project(project)
+
+    # Track which pipeline acquire() was asked for.
+    seen = {}
+    reg = ModelRegistry(default_config())
+    original = reg.acquire
+    def spy(task, capability, **kw):
+        seen["scene_class"] = kw.get("scene_class")
+        seen["pipeline"] = kw.get("pipeline")
+        raise NotImplementedError("stop here — we only care about how we were called")
+    reg.acquire = spy
+    handle_suggest_regions(store, registry_map, reg, fid="1", prompts=["x"])
+    assert seen["scene_class"] == "dense_crowd"
+    assert seen["pipeline"] is None  # routing happens inside config.pipeline_for
+
+
+# --- saliency clustering (no torch needed; cv2 is required, skip if missing) ---
+
+def test_cluster_to_tiles_groups_bright_blobs():
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from annotate.models.saliency import cluster_to_tiles
+
+    # Build a 200×200 saliency map with two bright squares
+    sal = np.zeros((200, 200), dtype="uint8")
+    sal[20:60, 20:60] = 220       # blob A
+    sal[120:170, 100:170] = 200   # blob B
+    tiles = cluster_to_tiles(sal, threshold=0.4, max_tiles=8, min_area_fraction=0.001)
+    assert len(tiles) == 2
+    # Larger blob (B = 50*70=3500) should be first; A = 40*40=1600
+    assert tiles[0].w * tiles[0].h >= tiles[1].w * tiles[1].h
+
+
+def test_cluster_to_tiles_caps_max_tiles():
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from annotate.models.saliency import cluster_to_tiles
+
+    sal = np.zeros((200, 200), dtype="uint8")
+    # Plant 12 distinct blobs
+    coords = [(i * 15, j * 15) for i in range(4) for j in range(3)]
+    for x, y in coords:
+        sal[y:y + 8, x:x + 8] = 255
+    tiles = cluster_to_tiles(sal, threshold=0.4, max_tiles=5, min_area_fraction=0.0001)
+    assert len(tiles) == 5
+
+
 # --- Phase 4: via_verify_region with mock verifier ---
 
 
