@@ -86,6 +86,20 @@ The verdict is heuristic — read the supporting / contradicting text
 and use your own judgment. Don't auto-relabel on `no`; surface the
 result for review.
 
+**Known limitation — named identities and specialist vocabulary.**
+`via_verify_region` is only reliable for *generic visual categories*.
+It can confirm "is there a face?", "is there cloth?", "is there a
+needle?" — but it cannot verify named identities ("Camus face") or
+specialist vocabulary ("curved eye-pointed needle", "baster plate").
+For those labels Qwen-3B returns `no` regardless of placement quality,
+because the model lacks the person-identification and domain-vocabulary
+capacity to confirm the claim. To get a useful verdict on such labels,
+pass a simplified generic label to the tool instead of the full proper-
+noun form: use `"face"` not `"Camus face"`, `"needle"` not `"curved
+eye-pointed needle"`. For named-identity or specialist labels where a
+generic substitute isn't meaningful, skip verify and rely on grade +
+overlay + user review.
+
 ### `via_grade_annotations(fid)`
 
 CLIP-cosine rubric scoring every region (or a subset via `mids=[...]`)
@@ -99,6 +113,18 @@ on position, size, label match, and shape-encoding fit. Use when:
 Reports only — never modifies the project. Each flagged region comes
 with `issues` notes; surface those to the user rather than silently
 acting.
+
+**False positive — elongated mechanical objects.** The grader fires
+a "very long rectangle — polyline may read better" flag on any long
+narrow rectangle. For *freeform* elongated shapes (draped cloth,
+curved branch, vine) this is usually correct. For *mechanical* parts
+where the rectangle encodes *operating range* — a needle bar's
+reciprocating sweep, a baster plate's full span, a track's length —
+the flag is a false positive: the rectangle is the right encoding
+because extent is the annotation's semantic content, not just the
+object's outline. When position and size scores are high but
+`shape_encoding_fit = marginal` on a rod / bar / shaft, check whether
+the extent matters. If it does, retain the rectangle.
 
 ### `via_classify_scene(fid)`
 

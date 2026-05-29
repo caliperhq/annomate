@@ -24,6 +24,17 @@ structural parts count as the thing being named*. Ask: if a viewer
 drew a line around "the X" with no prior context, where would they
 stop? Box to there.
 
+**Named feature at one end of an elongated object.** When the label
+names a feature at *one end* of an elongated object — "Lucia candle
+crown" (the crown assembly, not the full candle shaft), "speartip"
+(not the shaft), "needle eye" (not the full needle length) — box the
+*named end*, not the full object length. The grade rubric uses the
+box's geometric centre as its reference point; a box centred on the
+shaft will score low even if correctly framed. The label name tells
+you where the semantic mass should be; the object's full extent is
+irrelevant unless the label explicitly covers it ("needle bar sweep"
+would warrant a full-extent box; "needle eye" would not).
+
 ## Coordinate placement
 
 **Re-crop immediately before placing small features.** Crops you took
@@ -45,6 +56,24 @@ y-bias on your placements. Before placing any boxes, take two crops —
 upper half and lower half — and place positions off those, not the
 full-image view. Saves a full correction round.
 
+**Lower-third y-positions read too high.** Even outside dense
+compositions, features in the lower ~40% of the frame have their y
+coordinates underestimated from the full-image view — the box lands
+too high. A bow tie on a forward-leaning figure, a sash low on a
+standing person, a plate on a shelf, a stamp on a plinth base: all of
+these place 40–100 px high when eyeballed off the full image. For any
+feature below y ≈ 0.60, take a fresh crop of the lower portion and
+read coordinates off that.
+
+**Anchoring off a dominant element.** When a figure's exact position
+is hard to read (small scale, partial occlusion, complex background),
+don't anchor its coordinates from the edge of a nearby dominant element
+— "the figure starts where the arch ends", "the twin is to the right of
+the wolf". Initialising from a dominant element's edge produces offsets
+proportional to that element's size, not the figure's position. Read
+the figure's own visual centre directly off a fresh crop of its local
+area.
+
 ## Identity and labelling
 
 **Crop-and-drop, not just crop-and-place.** `via_get_image_crop` is
@@ -63,6 +92,14 @@ should have a pupil. The overlay check confirms a box is in the right
 neighborhood; it does *not* catch you labeling the helmeted head
 "windscreen" because the prior expected one nearby. One session
 shipped a complete pilot↔windscreen label swap that overlay passed.
+
+**Profile-view face anchor.** For subjects photographed in strict
+profile (side-view), do not anchor the face box from the back of the
+head (ear side). The face's geometric centre sits substantially further
+into the profile direction than the ear implies — typically 50–70 px
+further when the face fills ~20–30% of the frame width. Use the nose
+bridge or the cheekbone as the far anchor and work inward, not the ear
+as the near anchor and work outward.
 
 **Reflections are separate regions.** On still water, glass, polished
 floors, or any mirror surface, the reflection is its own visual

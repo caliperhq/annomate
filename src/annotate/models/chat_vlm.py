@@ -51,6 +51,12 @@ def _label_match(caption: str, label: str) -> tuple[bool, float]:
 
 def _extract_suggested_label(caption: str) -> str | None:
     text = caption.strip().rstrip(".")
+    # Strip generic VLM opener ("The image shows a ...", "This photo depicts ...").
+    text = re.sub(
+        r"(?i)^(?:the\s+)?(?:image|photo|photograph|picture)\s+"
+        r"(?:shows?|depicts?|contains?|features?|displays?)\s+",
+        "", text,
+    ).strip()
     m = re.match(r"^\s*(?:an?|the)\s+([a-z]+(?:\s+[a-z]+){0,2})", text, re.I)
     if m:
         return m.group(1).strip()
