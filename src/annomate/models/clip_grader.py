@@ -30,8 +30,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from annotate.models.base import Adapter, Grade
-from annotate.models.registry import register_adapter
+from annomate.models.base import Adapter, Grade
+from annomate.models.registry import register_adapter
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage

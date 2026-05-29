@@ -4,8 +4,8 @@ import json
 import pytest
 import mcp.types as types
 
-from annotate.store import ProjectStore
-from annotate.server import (
+from annomate.store import ProjectStore
+from annomate.server import (
     handle_get_project,
     handle_list_files,
     handle_get_annotations,
@@ -394,7 +394,7 @@ def test_add_file_resolves_basename_conflict(store, tmp_path):
 # --- default attribute schema ---
 
 def test_new_project_has_default_attributes(store, tmp_path):
-    from annotate.server import _minimal_project
+    from annomate.server import _minimal_project
     p = _minimal_project()
     assert "1" in p["attribute"]
     assert p["attribute"]["1"]["aname"] == "label"
@@ -699,7 +699,7 @@ class _FakeDetector:
     capabilities = ("detect",)
 
     def __init__(self, detections):
-        from annotate.models.base import Detection
+        from annomate.models.base import Detection
         self._detections = [Detection(**d) for d in detections]
 
     def detect(self, image, prompts, **kwargs):
@@ -708,19 +708,19 @@ class _FakeDetector:
 
 def _build_registry_with_fake(detections):
     """Return a ModelRegistry whose acquire('detect','detect') yields _FakeDetector."""
-    from annotate.models import ModelRegistry, default_config
+    from annomate.models import ModelRegistry, default_config
     reg = ModelRegistry(default_config())
     fake = _FakeDetector(detections)
     # Bypass the construct/load path — drop the fake straight into the cache
-    from annotate.models.registry import _LoadedEntry
+    from annomate.models.registry import _LoadedEntry
     import time
     reg._loaded["detect.default"] = _LoadedEntry(fake, time.monotonic())
     return reg
 
 
 def test_suggest_regions_no_project(store):
-    from annotate.server import handle_suggest_regions
-    from annotate.models import ModelRegistry, default_config
+    from annomate.server import handle_suggest_regions
+    from annomate.models import ModelRegistry, default_config
     reg = ModelRegistry(default_config())
     result = handle_suggest_regions(store, {}, reg, fid="1", prompts=["x"])
     assert "No project" in _text(result)
@@ -728,7 +728,7 @@ def test_suggest_regions_no_project(store):
 
 def test_suggest_regions_no_registry_returns_stub(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_suggest_regions
+    from annomate.server import handle_suggest_regions
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry: dict = {}
@@ -743,7 +743,7 @@ def test_suggest_regions_tiles_and_returns_candidates(store, tmp_path):
     call the detector per tile, map back to image fraction space, and
     return merged candidates."""
     from PIL import Image as PILImage
-    from annotate.server import handle_suggest_regions
+    from annomate.server import handle_suggest_regions
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -771,7 +771,7 @@ def test_suggest_regions_tiles_and_returns_candidates(store, tmp_path):
 
 def test_suggest_regions_exclude_existing_filters_overlaps(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_suggest_regions
+    from annomate.server import handle_suggest_regions
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -794,8 +794,8 @@ def test_suggest_regions_exclude_existing_filters_overlaps(store, tmp_path):
 
 def test_suggest_regions_broad_prompts_uses_default_set(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.models.tiling import DEFAULT_BROAD_PROMPTS
-    from annotate.server import handle_suggest_regions
+    from annomate.models.tiling import DEFAULT_BROAD_PROMPTS
+    from annomate.server import handle_suggest_regions
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -817,7 +817,7 @@ class _FakeSegmenter:
     capabilities = ("segment",)
 
     def __init__(self, return_xy_fraction, iou=0.85, area_fraction=0.02):
-        from annotate.models.base import Mask
+        from annomate.models.base import Mask
         self._result = Mask(
             xy=return_xy_fraction,
             iou_with_input=iou,
@@ -837,7 +837,7 @@ class _FakeGrader:
         self._kw = dict(position=position, size=size, label_match=label_match, fit=fit)
 
     def grade(self, image, region, label):
-        from annotate.models.base import Grade
+        from annomate.models.base import Grade
         return Grade(
             mid=region.get("_mid", ""),
             label=label,
@@ -850,8 +850,8 @@ class _FakeGrader:
 
 
 def _registry_with_pipeline(adapter, pipeline_key="segment.default"):
-    from annotate.models import ModelRegistry, default_config
-    from annotate.models.registry import _LoadedEntry
+    from annomate.models import ModelRegistry, default_config
+    from annomate.models.registry import _LoadedEntry
     import time
     reg = ModelRegistry(default_config())
     reg._loaded[pipeline_key] = _LoadedEntry(adapter, time.monotonic())
@@ -860,7 +860,7 @@ def _registry_with_pipeline(adapter, pipeline_key="segment.default"):
 
 def test_tighten_region_unknown_mid(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -872,7 +872,7 @@ def test_tighten_region_unknown_mid(store, tmp_path):
 
 def test_tighten_region_returns_tightened_box_without_writing(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -894,7 +894,7 @@ def test_tighten_region_returns_tightened_box_without_writing(store, tmp_path):
 
 def test_tighten_region_auto_apply_writes_back(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -913,7 +913,7 @@ class _FakeSegmenterWithPolygon:
     capabilities = ("segment",)
 
     def __init__(self):
-        from annotate.models.base import Mask
+        from annomate.models.base import Mask
         self._result = Mask(
             xy=[2, 0.2, 0.2, 0.3, 0.3],
             iou_with_input=0.72,
@@ -928,7 +928,7 @@ class _FakeSegmenterWithPolygon:
 
 def test_tighten_region_polygon_input_returns_polygon_output(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -951,7 +951,7 @@ def test_tighten_region_polygon_input_returns_polygon_output(store, tmp_path):
 
 def test_tighten_region_polygon_auto_apply_writes_polygon(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -973,7 +973,7 @@ def test_tighten_region_polygon_auto_apply_writes_polygon(store, tmp_path):
 def test_tighten_region_bbox_input_unchanged_behaviour(store, tmp_path):
     """Existing bbox tighten behaviour is unaffected when adapter has no polygon."""
     from PIL import Image as PILImage
-    from annotate.server import handle_tighten_region
+    from annomate.server import handle_tighten_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -993,7 +993,7 @@ def test_tighten_region_bbox_input_unchanged_behaviour(store, tmp_path):
 
 def test_grade_annotations_empty_fid_returns_empty_set(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_grade_annotations
+    from annomate.server import handle_grade_annotations
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1007,7 +1007,7 @@ def test_grade_annotations_empty_fid_returns_empty_set(store, tmp_path):
 
 def test_grade_annotations_scores_each_region(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_grade_annotations
+    from annomate.server import handle_grade_annotations
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1042,7 +1042,7 @@ class _FakeAsker:
         self._last_image_size = None
 
     def ask(self, image, question, **kwargs):
-        from annotate.models.base import Answer
+        from annomate.models.base import Answer
         self._last_question = question
         self._last_image_size = image.size
         return Answer(question=question, text=self._text,
@@ -1057,16 +1057,16 @@ class _FakeSimilarityFinder:
         self._dets = detections_per_target or []
 
     def find_similar(self, target_image, reference_image, reference_box_pixel, **kwargs):
-        from annotate.models.base import Detection
+        from annomate.models.base import Detection
         return [Detection(**d) for d in self._dets]
 
 
 def _reg_with_adapter(pipeline_key, adapter):
     """Build a registry with a fake adapter pre-cached AND a matching
     config entry so acquire() resolves successfully."""
-    from annotate.models import ModelRegistry, default_config
-    from annotate.models.config import PipelineConfig
-    from annotate.models.registry import _LoadedEntry
+    from annomate.models import ModelRegistry, default_config
+    from annomate.models.config import PipelineConfig
+    from annomate.models.registry import _LoadedEntry
     import time
     reg = ModelRegistry(default_config())
     task, name = pipeline_key.split(".", 1)
@@ -1082,7 +1082,7 @@ def _reg_with_adapter(pipeline_key, adapter):
 
 def test_ask_model_empty_question_errors(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_ask_model
+    from annomate.server import handle_ask_model
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1094,7 +1094,7 @@ def test_ask_model_empty_question_errors(store, tmp_path):
 
 def test_ask_model_full_image(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_ask_model
+    from annomate.server import handle_ask_model
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 300), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1111,7 +1111,7 @@ def test_ask_model_full_image(store, tmp_path):
 
 def test_ask_model_with_region_bbox_crops(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_ask_model
+    from annomate.server import handle_ask_model
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1127,7 +1127,7 @@ def test_ask_model_with_region_bbox_crops(store, tmp_path):
 
 def test_ask_model_with_metadata_id(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_ask_model
+    from annomate.server import handle_ask_model
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1146,7 +1146,7 @@ def test_ask_model_with_metadata_id(store, tmp_path):
 
 def test_find_similar_unknown_mid(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_find_similar
+    from annomate.server import handle_find_similar
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1158,7 +1158,7 @@ def test_find_similar_unknown_mid(store, tmp_path):
 
 def test_find_similar_returns_per_target_results(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_find_similar
+    from annomate.server import handle_find_similar
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (1000, 1000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1197,9 +1197,9 @@ class _FakeClassifier:
 
 def test_classify_scene_persists_top_label(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_classify_scene
-    from annotate.models import ModelRegistry, default_config
-    from annotate.models.registry import _LoadedEntry
+    from annomate.server import handle_classify_scene
+    from annomate.models import ModelRegistry, default_config
+    from annomate.models.registry import _LoadedEntry
     import time
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
@@ -1223,9 +1223,9 @@ def test_classify_scene_persists_top_label(store, tmp_path):
 
 def test_classify_scene_no_labels_errors(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_classify_scene
-    from annotate.models.config import _parse
-    from annotate.models import ModelRegistry
+    from annomate.server import handle_classify_scene
+    from annomate.models.config import _parse
+    from annomate.models import ModelRegistry
     import sys
     if sys.version_info >= (3, 11):
         import tomllib
@@ -1247,8 +1247,8 @@ def test_routing_passes_scene_class_to_detector(store, tmp_path):
     cause the detect handler to ask for pipeline 'dense_scene' (not 'default').
     """
     from PIL import Image as PILImage
-    from annotate.server import handle_suggest_regions
-    from annotate.models import ModelRegistry, default_config
+    from annomate.server import handle_suggest_regions
+    from annomate.models import ModelRegistry, default_config
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1276,7 +1276,7 @@ def test_routing_passes_scene_class_to_detector(store, tmp_path):
 def test_cluster_to_tiles_groups_bright_blobs():
     cv2 = pytest.importorskip("cv2")
     import numpy as np
-    from annotate.models.saliency import cluster_to_tiles
+    from annomate.models.saliency import cluster_to_tiles
 
     # Build a 200×200 saliency map with two bright squares
     sal = np.zeros((200, 200), dtype="uint8")
@@ -1291,7 +1291,7 @@ def test_cluster_to_tiles_groups_bright_blobs():
 def test_cluster_to_tiles_caps_max_tiles():
     cv2 = pytest.importorskip("cv2")
     import numpy as np
-    from annotate.models.saliency import cluster_to_tiles
+    from annomate.models.saliency import cluster_to_tiles
 
     sal = np.zeros((200, 200), dtype="uint8")
     # Plant 12 distinct blobs
@@ -1318,15 +1318,15 @@ class _FakeVerifier:
 
 def test_verify_region_unknown_mid(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_verify_region
-    from annotate.models.base import Verdict
+    from annomate.server import handle_verify_region
+    from annomate.models.base import Verdict
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
     handle_add_file(store, registry_map, 9669, str(img_path))
     fake = _FakeVerifier(Verdict("x", "yes", 0.9))
-    from annotate.models import ModelRegistry, default_config
-    from annotate.models.registry import _LoadedEntry
+    from annomate.models import ModelRegistry, default_config
+    from annomate.models.registry import _LoadedEntry
     import time
     reg = ModelRegistry(default_config())
     reg._loaded["verify.default"] = _LoadedEntry(fake, time.monotonic())
@@ -1336,7 +1336,7 @@ def test_verify_region_unknown_mid(store, tmp_path):
 
 def test_verify_region_label_missing(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_verify_region
+    from annomate.server import handle_verify_region
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (400, 400), color=(0, 0, 0)).save(img_path, "JPEG")
     registry_map: dict = {}
@@ -1345,7 +1345,7 @@ def test_verify_region_label_missing(store, tmp_path):
     add = handle_add_region(store, registry_map, vid="1", z=[],
                             xy=[2, 50, 50, 100, 100], av={})
     mid = json.loads(_text(add))["metadata_id"]
-    from annotate.models import ModelRegistry, default_config
+    from annomate.models import ModelRegistry, default_config
     reg = ModelRegistry(default_config())
     result = handle_verify_region(store, registry_map, reg, metadata_id=mid)
     assert "no label" in _text(result)
@@ -1353,10 +1353,10 @@ def test_verify_region_label_missing(store, tmp_path):
 
 def test_verify_region_happy_path(store, tmp_path):
     from PIL import Image as PILImage
-    from annotate.server import handle_verify_region
-    from annotate.models.base import Verdict
-    from annotate.models import ModelRegistry, default_config
-    from annotate.models.registry import _LoadedEntry
+    from annomate.server import handle_verify_region
+    from annomate.models.base import Verdict
+    from annomate.models import ModelRegistry, default_config
+    from annomate.models.registry import _LoadedEntry
     import time
     img_path = tmp_path / "i.jpg"
     PILImage.new("RGB", (800, 800), color=(0, 0, 0)).save(img_path, "JPEG")
@@ -1387,20 +1387,20 @@ def test_verify_region_happy_path(store, tmp_path):
 # --- Label-match heuristic (no torch needed) ---
 
 def test_label_match_finds_token_overlap():
-    from annotate.models.florence2 import _label_match
+    from annomate.models.florence2 import _label_match
     ok, conf = _label_match("a brown leather flying helmet with goggles", "leather helmet")
     assert ok is True
     assert conf > 0.7
 
 
 def test_label_match_misses_unrelated():
-    from annotate.models.florence2 import _label_match
+    from annomate.models.florence2 import _label_match
     ok, _ = _label_match("a windscreen", "leather helmet")
     assert ok is False
 
 
 def test_extract_suggested_label_pulls_noun_phrase():
-    from annotate.models.florence2 import _extract_suggested_label
+    from annomate.models.florence2 import _extract_suggested_label
     assert _extract_suggested_label("A brown leather helmet with goggles") == "brown leather helmet"
     assert _extract_suggested_label("the small wooden boat") == "small wooden boat"
 
@@ -1408,7 +1408,7 @@ def test_extract_suggested_label_pulls_noun_phrase():
 # --- shape-encoding-fit heuristic (no torch needed) ---
 
 def test_shape_encoding_fit_flags_very_long_rectangles():
-    from annotate.models.clip_grader import _shape_encoding_fit
+    from annomate.models.clip_grader import _shape_encoding_fit
     # 600px wide × 50px tall — aspect 12 → marginal
     fit, note = _shape_encoding_fit([2, 0, 0, 600, 50], (0, 0, 600, 50))
     assert fit == "marginal"
@@ -1416,14 +1416,14 @@ def test_shape_encoding_fit_flags_very_long_rectangles():
 
 
 def test_shape_encoding_fit_passes_balanced_rectangles():
-    from annotate.models.clip_grader import _shape_encoding_fit
+    from annomate.models.clip_grader import _shape_encoding_fit
     fit, note = _shape_encoding_fit([2, 0, 0, 200, 150], (0, 0, 200, 150))
     assert fit == "good"
     assert note is None
 
 
 def test_shape_encoding_fit_flags_non_square_circle():
-    from annotate.models.clip_grader import _shape_encoding_fit
+    from annomate.models.clip_grader import _shape_encoding_fit
     # Circle whose bbox is 200×100 — should suggest ellipse instead
     fit, _ = _shape_encoding_fit([3, 100, 50, 50], (0, 0, 200, 100))
     assert fit == "marginal"
@@ -1432,7 +1432,7 @@ def test_shape_encoding_fit_flags_non_square_circle():
 # --- Phase 1: local-model stub tools ---
 
 def test_model_status_with_no_registry_returns_disabled():
-    from annotate.server import handle_model_status
+    from annomate.server import handle_model_status
     result = handle_model_status(None)
     data = json.loads(_text(result))
     assert data["ai_extra_available"] is False
@@ -1441,8 +1441,8 @@ def test_model_status_with_no_registry_returns_disabled():
 
 
 def test_model_status_with_registry_returns_snapshot():
-    from annotate.server import handle_model_status
-    from annotate.models import ModelRegistry, default_config
+    from annomate.server import handle_model_status
+    from annomate.models import ModelRegistry, default_config
     reg = ModelRegistry(default_config())
     result = handle_model_status(reg)
     data = json.loads(_text(result))
@@ -1451,14 +1451,14 @@ def test_model_status_with_registry_returns_snapshot():
 
 
 def test_ai_stub_response_advertises_install_hint_when_extra_missing():
-    from annotate.server import _ai_stub_response
+    from annomate.server import _ai_stub_response
     result = _ai_stub_response("via_suggest_regions", None)
     data = json.loads(_text(result))
     assert data["tool"] == "via_suggest_regions"
     assert data["available"] is False
     # When extra is missing, an install hint should appear
     if not data.get("ai_extra_installed"):
-        assert "annotate[ai]" in data["install_hint"]
+        assert "annomate[ai]" in data["install_hint"]
 
 
 def test_get_image_crop_overlay_skips_off_crop_regions(store, tmp_path):
@@ -1467,7 +1467,7 @@ def test_get_image_crop_overlay_skips_off_crop_regions(store, tmp_path):
     crop edge. Off-crop regions should be skipped entirely.
     """
     from PIL import Image as PILImage
-    from annotate.server import _draw_overlay
+    from annomate.server import _draw_overlay
     img_path = tmp_path / "big.jpg"
     PILImage.new("RGB", (4000, 2000), color=(0, 0, 0)).save(img_path, "JPEG")
     registry: dict = {}
@@ -1511,7 +1511,7 @@ def test_view_reset_fixes_present_in_html():
       3. Auto-poll uses incremental metadata diff (was full via.s.pull → view re-init).
     """
     from importlib.resources import files
-    html = files("annotate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
+    html = files("annomate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
 
     # 1. project_updated handler
     assert "current_vid in this.d.store.project.vid_list" not in html, (
@@ -1525,7 +1525,7 @@ def test_view_reset_fixes_present_in_html():
     )
 
     # 3. Incremental-pull snippet replaced the naive setInterval(via.s.pull)
-    assert "annotate: incremental pull" in html
+    assert "annomate: incremental pull" in html
     assert "metadata_delete_bulk" in html  # synthesized event for removed regions
     # the old naive pattern must be gone
     assert "if (remote.project.rev !== via.d.store.project.rev)\n      via.s.pull(pid);" not in html
@@ -1538,7 +1538,7 @@ def test_main_heals_stale_src_urls(tmp_path, monkeypatch):
     then verify the heal step rewrites src to the current port without touching abs_path.
     """
     from PIL import Image as PILImage
-    from annotate.store import ProjectStore
+    from annomate.store import ProjectStore
 
     img = tmp_path / "stale.jpg"
     PILImage.new("RGB", (32, 32), color=(0, 255, 0)).save(img, "JPEG")
@@ -1575,7 +1575,7 @@ def test_main_heals_stale_src_urls(tmp_path, monkeypatch):
 # --- via_capabilities ---
 
 def test_capabilities_returns_expected_structure(store):
-    from annotate.server import handle_capabilities
+    from annomate.server import handle_capabilities
     result = handle_capabilities(store, registry=None)
     data = json.loads(_text(result))
     assert "server_version" in data
@@ -1591,8 +1591,8 @@ def test_capabilities_returns_expected_structure(store):
 
 
 def test_capabilities_with_registry_includes_pipelines(store):
-    from annotate.server import handle_capabilities
-    from annotate.models import ModelRegistry, default_config
+    from annomate.server import handle_capabilities
+    from annomate.models import ModelRegistry, default_config
     reg = ModelRegistry(default_config())
     result = handle_capabilities(store, registry=reg)
     data = json.loads(_text(result))
@@ -1604,7 +1604,7 @@ def test_capabilities_with_registry_includes_pipelines(store):
 
 def test_florence2_compat_patch_wraps_init():
     """_patch_florence2_config_compat wraps __init__ to inject forced_bos_token_id."""
-    from annotate.models.florence2 import Florence2Adapter
+    from annomate.models.florence2 import Florence2Adapter
 
     class _BrokenConfig:
         _annotate_f2_compat = False
@@ -1634,7 +1634,7 @@ def test_florence2_compat_patch_wraps_init():
 def test_florence2_compat_patch_graceful_on_missing_transformers(monkeypatch):
     """_patch_florence2_config_compat is a no-op when dynamic_module_utils unavailable."""
     import builtins
-    from annotate.models.florence2 import Florence2Adapter
+    from annomate.models.florence2 import Florence2Adapter
 
     adapter = Florence2Adapter("microsoft/Florence-2-base")
 

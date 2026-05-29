@@ -60,9 +60,7 @@ ocr = [
 ]
 
 [project.scripts]
-# Binary is `annomate`; the Python import package is still `annotate`
-# (source dir rename deferred — not breaking anything).
-annomate = "annotate.server:main"
+annomate = "annomate.server:main"
 
 [project.urls]
 Repository = "https://github.com/caliperhq/annomate"
@@ -71,7 +69,7 @@ Repository = "https://github.com/caliperhq/annomate"
 where = ["src"]
 
 [tool.setuptools.package-data]
-annotate = ["via_image_annotator.html"]
+annomate = ["via_image_annotator.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

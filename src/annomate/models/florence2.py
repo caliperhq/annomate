@@ -20,8 +20,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from annotate.models.base import Adapter, Verdict
-from annotate.models.registry import register_adapter
+from annomate.models.base import Adapter, Verdict
+from annomate.models.registry import register_adapter
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage

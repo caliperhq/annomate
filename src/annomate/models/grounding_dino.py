@@ -6,7 +6,7 @@ Wraps the HuggingFace ``transformers`` implementation
 in ``load()`` so the base package stays torch-free.
 
 This file *registers itself* on import: importing
-``annotate.models.grounding_dino`` calls ``register_adapter`` for the
+``annomate.models.grounding_dino`` calls ``register_adapter`` for the
 ``IDEA-Research/grounding-dino-`` prefix. The server lazily imports this
 module the first time ``acquire("detect", "detect")`` is called for a
 matching pipeline.
@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from annotate.models.base import Adapter, Detection
-from annotate.models.registry import register_adapter
+from annomate.models.base import Adapter, Detection
+from annomate.models.registry import register_adapter
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage

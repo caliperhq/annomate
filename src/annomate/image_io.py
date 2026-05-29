@@ -4,7 +4,7 @@ Sits between every PIL-open call and the actual file. Pillow-native
 formats pass through untouched; everything else is opened via the
 appropriate loader (pillow-heif for HEIC/HEIF/AVIF, future: rawpy for
 RAW, pdf2image for PDF, etc.) and converted once to JPEG for the
-browser, cached under ``platformdirs.user_cache_dir("annotate")``.
+browser, cached under ``platformdirs.user_cache_dir("annomate")``.
 
 The original file path stays authoritative in the project; the
 browser-serving path is a transparent optimisation handled here.
@@ -109,7 +109,7 @@ def detect(path: Path | str) -> LoaderClass:
 
 def cache_dir() -> Path:
     """The on-disk location for converted browser-servable JPEGs."""
-    return Path(platformdirs.user_cache_dir("annotate", appauthor=False)) / "converted"
+    return Path(platformdirs.user_cache_dir("annomate", appauthor=False)) / "converted"
 
 
 def _cache_key(abs_path: Path, page: int = 0) -> str:
@@ -148,7 +148,7 @@ def cached_browser_path(abs_path: Path | str, *, page: int = 0) -> Path:
     if klass is LoaderClass.UNKNOWN:
         raise LookupError(
             f"Unsupported image format {ext!r} for {abs_path}. "
-            f"Install the [io] extra (pip install 'annotate[io]') for "
+            f"Install the [io] extra (pip install 'annomate[io]') for "
             f"HEIC/AVIF support."
         )
 

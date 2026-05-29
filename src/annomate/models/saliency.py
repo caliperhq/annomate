@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from annotate.models.base import Adapter
-from annotate.models.registry import register_adapter
-from annotate.models.tiling import Tile
+from annomate.models.base import Adapter
+from annomate.models.registry import register_adapter
+from annomate.models.tiling import Tile
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage

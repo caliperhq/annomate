@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from annotate import image_io
-from annotate.image_io import (
+from annomate import image_io
+from annomate.image_io import (
     BROWSER_NATIVE,
     LoaderClass,
     _cache_key,
@@ -109,7 +109,7 @@ def test_cached_browser_path_unknown_format_raises_lookup(tmp_path):
     src.write_bytes(b"\x00" * 16)
     with pytest.raises(LookupError) as exc:
         cached_browser_path(src)
-    assert "annotate[io]" in str(exc.value) or ".cr2" in str(exc.value)
+    assert "annomate[io]" in str(exc.value) or ".cr2" in str(exc.value)
 
 
 def test_cache_key_changes_with_mtime(tmp_path):
@@ -156,8 +156,8 @@ def test_open_metadata_jpeg_with_exif_extracts_camera(tmp_path):
 # --- via_read_metadata handler integration ---
 
 def test_handle_read_metadata_unknown_fid(tmp_path):
-    from annotate.store import ProjectStore
-    from annotate.server import handle_read_metadata, handle_add_file
+    from annomate.store import ProjectStore
+    from annomate.server import handle_read_metadata, handle_add_file
     from PIL import Image as PILImage
 
     state = tmp_path / "state.json"
@@ -173,8 +173,8 @@ def test_handle_read_metadata_unknown_fid(tmp_path):
 
 def test_handle_read_metadata_returns_dims(tmp_path):
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_read_metadata, handle_add_file
+    from annomate.store import ProjectStore
+    from annomate.server import handle_read_metadata, handle_add_file
     from PIL import Image as PILImage
 
     state = tmp_path / "state.json"
@@ -247,8 +247,8 @@ def test_cached_browser_path_pdf_caches_per_page(tmp_path, monkeypatch):
 @_NEEDS_PDF
 def test_handle_load_document_all_pages(tmp_path, monkeypatch):
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_load_document
+    from annomate.store import ProjectStore
+    from annomate.server import handle_load_document
     monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
 
     pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 4)
@@ -272,8 +272,8 @@ def test_handle_load_document_all_pages(tmp_path, monkeypatch):
 @_NEEDS_PDF
 def test_handle_load_document_specific_pages(tmp_path, monkeypatch):
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_load_document
+    from annomate.store import ProjectStore
+    from annomate.server import handle_load_document
     monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
 
     pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 5)
@@ -289,8 +289,8 @@ def test_handle_load_document_specific_pages(tmp_path, monkeypatch):
 @_NEEDS_PDF
 def test_handle_load_document_filters_out_of_range_pages(tmp_path, monkeypatch):
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_load_document
+    from annomate.store import ProjectStore
+    from annomate.server import handle_load_document
     monkeypatch.setattr(image_io, "cache_dir", lambda: tmp_path / "_cache")
 
     pdf_path = _write_multipage_pdf(tmp_path / "doc.pdf", 2)
@@ -304,8 +304,8 @@ def test_handle_load_document_filters_out_of_range_pages(tmp_path, monkeypatch):
 
 
 def test_handle_load_document_rejects_non_pdf(tmp_path):
-    from annotate.store import ProjectStore
-    from annotate.server import handle_load_document
+    from annomate.store import ProjectStore
+    from annomate.server import handle_load_document
     from PIL import Image as PILImage
 
     img_path = tmp_path / "not_a_pdf.jpg"
@@ -376,8 +376,8 @@ def test_run_ocr_filters_by_confidence(tmp_path):
 @_NEEDS_OCR
 def test_handle_run_ocr_returns_candidates(tmp_path):
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_add_file, handle_run_ocr
+    from annomate.store import ProjectStore
+    from annomate.server import handle_add_file, handle_run_ocr
 
     p = _render_text_image(tmp_path / "hello.png", "HELLO ANNOTATE")
     store = ProjectStore(state_file=tmp_path / "state.json")
@@ -397,8 +397,8 @@ def test_handle_run_ocr_region_bbox_remaps_coords(tmp_path):
     """OCR over a sub-region — output coords should be fractions of the
     *whole* image, not the crop."""
     import json as _json
-    from annotate.store import ProjectStore
-    from annotate.server import handle_add_file, handle_run_ocr
+    from annomate.store import ProjectStore
+    from annomate.server import handle_add_file, handle_run_ocr
 
     p = _render_text_image(tmp_path / "hello.png", "BIG TEXT",
                             size=(800, 200))
@@ -418,8 +418,8 @@ def test_handle_run_ocr_region_bbox_remaps_coords(tmp_path):
 def test_handle_run_ocr_without_extra_returns_install_hint(tmp_path, monkeypatch):
     """When pytesseract isn't importable, the handler returns the install
     hint without trying anything else."""
-    from annotate.store import ProjectStore
-    from annotate.server import handle_add_file, handle_run_ocr
+    from annomate.store import ProjectStore
+    from annomate.server import handle_add_file, handle_run_ocr
     from PIL import Image as PILImage
     monkeypatch.setattr(image_io, "ocr_available", lambda: False)
 
@@ -429,4 +429,4 @@ def test_handle_run_ocr_without_extra_returns_install_hint(tmp_path, monkeypatch
     registry: dict = {}
     handle_add_file(store, registry, 9669, str(p))
     result = handle_run_ocr(store, registry, fid="1")
-    assert "annotate[ocr]" in result[0].text
+    assert "annomate[ocr]" in result[0].text

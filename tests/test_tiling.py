@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from annotate.models.tiling import (
+from annomate.models.tiling import (
     CandidateBox,
     DEFAULT_BROAD_PROMPTS,
     auto_grid,

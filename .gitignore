@@ -9,7 +9,7 @@ venv/
 .venv/
 
 # Generated — rebuild with scripts/build_html.py
-src/annotate/via_image_annotator.html
+src/annomate/via_image_annotator.html
 
 # Runtime state
 *.json

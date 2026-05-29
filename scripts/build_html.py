@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Patch VIA image annotator HTML from the submodule and copy to src/annotate/.
+Patch VIA image annotator HTML from the submodule and copy to src/annomate/.
 
 Run before building a release:
     python scripts/build_html.py
@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 VIA_HTML_SRC = ROOT / "via" / "via-3.x.y" / "dist" / "via_image_annotator.html"
-VIA_HTML_DST = ROOT / "src" / "annotate" / "via_image_annotator.html"
+VIA_HTML_DST = ROOT / "src" / "annomate" / "via_image_annotator.html"
 
 # If VIA bumps its major version directory (e.g. via-4.x.y), update this:
 VIA_VERSION_DIR = "via-3.x.y"
@@ -30,7 +30,7 @@ VIEW_RESET_FIX = "if ( this.d.store.project.vid_list.indexOf(current_vid) !== -1
 
 AUTO_POLL_SNIPPET = """\
 <script>
-/* annotate: incremental pull — avoid view_show reset on metadata-only changes.
+/* annomate: incremental pull — avoid view_show reset on metadata-only changes.
    Replaces the naive via.s.pull(pid), which triggers project_loaded →
    view_show(vid_list[0]), bouncing the user back to the first file and
    wiping in-progress UI state on every server write. */

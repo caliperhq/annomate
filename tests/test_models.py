@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from annotate.models import (
+from annomate.models import (
     Adapter,
     ModelRegistry,
     NotInstalledError,
@@ -17,8 +17,8 @@ from annotate.models import (
     default_config,
     load_config,
 )
-from annotate.models.config import DEFAULT_CONFIG_TOML
-from annotate.models.registry import register_adapter, _FACTORIES
+from annomate.models.config import DEFAULT_CONFIG_TOML
+from annomate.models.registry import register_adapter, _FACTORIES
 
 
 # --- config: loading + auto-generation ---
@@ -58,7 +58,7 @@ def test_load_config_env_var_override(monkeypatch, tmp_path):
         "[detect.default]\nmodel = \"env/picked\"\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("ANNOTATE_MODELS_CONFIG", str(path))
+    monkeypatch.setenv("ANNOMATE_MODELS_CONFIG", str(path))
     cfg = load_config()
     assert cfg.pipelines["detect.default"].model == "env/picked"
 
@@ -88,7 +88,7 @@ def test_registry_without_adapters_raises_install_hint(tmp_path):
         reg.acquire("detect", "detect")
     msg = str(exc.value)
     # Either ai-extra missing OR no adapter registered — both are install-hint shaped
-    assert "annotate[ai]" in msg or "No adapter registered" in msg
+    assert "annomate[ai]" in msg or "No adapter registered" in msg
 
 
 def test_registry_status_snapshot():
@@ -133,13 +133,13 @@ max_loaded_models = 2
         import tomllib
     else:
         import tomli as tomllib
-    from annotate.models.config import _parse
+    from annomate.models.config import _parse
     cfg = _parse(tomllib.loads(cfg_toml))
     reg = ModelRegistry(cfg)
 
     # Stub ai_extra_available so the construction path proceeds, and
     # register a fake factory for each model prefix.
-    import annotate.models.registry as r
+    import annomate.models.registry as r
     original_ai = r.ai_extra_available
     saved_factories = dict(_FACTORIES)
     try:

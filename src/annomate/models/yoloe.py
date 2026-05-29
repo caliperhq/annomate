@@ -10,7 +10,7 @@ remote users — may obligate you to share your server's source code under
 AGPL terms.
 
 For local single-user MCP use on your own machine, AGPL imposes no
-practical restriction. But anyone deploying ``annotate`` as a hosted
+practical restriction. But anyone deploying ``annomate`` as a hosted
 service should think carefully before enabling the ``[yolo]`` extra
 *and* configuring a YOLOE pipeline.
 
@@ -31,8 +31,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from annotate.models.base import Adapter, Detection, Mask
-from annotate.models.registry import register_adapter
+from annomate.models.base import Adapter, Detection, Mask
+from annomate.models.registry import register_adapter
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
@@ -46,7 +46,7 @@ def _warn_license_once() -> None:
     if _LICENSE_WARNED:
         return
     _LICENSE_WARNED = True
-    logging.getLogger("annotate").info(
+    logging.getLogger("annomate").info(
         "YOLOE is AGPL-3.0. Local single-user use is fine; hosted/network "
         "deployments should review the AGPL terms."
     )

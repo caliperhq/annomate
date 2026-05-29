@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING
 
 import re
 
-from annotate.models.base import Adapter, Answer, Verdict
-from annotate.models.registry import register_adapter
+from annomate.models.base import Adapter, Answer, Verdict
+from annomate.models.registry import register_adapter
 
 _STOPWORDS = frozenset({
     "a", "an", "the", "of", "and", "or", "in", "on", "with", "at", "to",

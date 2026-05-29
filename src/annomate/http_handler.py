@@ -4,7 +4,7 @@ import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-from annotate.store import ProjectNotFoundError, ProjectConflictError, ProjectStore
+from annomate.store import ProjectNotFoundError, ProjectConflictError, ProjectStore
 
 
 class VIAHandler(BaseHTTPRequestHandler):
@@ -41,7 +41,7 @@ class VIAHandler(BaseHTTPRequestHandler):
         # in platformdirs.user_cache_dir. PIL-native browser formats
         # (jpg/png/gif/webp) get the original path back unchanged.
         try:
-            from annotate import image_io
+            from annomate import image_io
             serve_path = image_io.cached_browser_path(abs_path)
         except (LookupError, ImportError):
             serve_path = abs_path

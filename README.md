@@ -153,7 +153,7 @@ VIA is included under its BSD 2-Clause License — see [NOTICE](NOTICE).
 
 YOLOE (an optional adapter) is upstream-licensed AGPL-3.0; if you enable
 that pipeline make sure that license fits your deployment context. See
-`src/annotate/models/yoloe.py` for the in-tree notice.
+`src/annomate/models/yoloe.py` for the in-tree notice.
 
 ## Development
 

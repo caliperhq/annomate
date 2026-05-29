@@ -19,7 +19,7 @@ Sister project to [jscad-mcp](https://github.com/caliperhq/jscad-mcp).
 ## Layout
 
 ```
-src/annotate/
+src/annomate/
 ├── store.py              # ProjectStore: in-memory + disk-persisted annotations
 ├── http_handler.py       # VIA REST protocol + image serving (cache-aware)
 ├── server.py             # MCP tool handlers + main() entry point
@@ -28,7 +28,7 @@ src/annotate/
 └── models/               # Local-model assistance (lazy adapters)
     ├── __init__.py
     ├── base.py           # Adapter ABC, capability literals, result types
-    ├── config.py         # TOML config (~/.config/annotate/models.toml)
+    ├── config.py         # TOML config (~/.config/annomate/models.toml)
     ├── registry.py       # Lazy load + LRU eviction
     ├── tiling.py         # SAHI-style tile generation + cross-tile NMS
     ├── grounding_dino.py # detect: text-prompt detection
@@ -117,7 +117,7 @@ cp skills/annomate/*.md ~/.claude/skills/annomate/
 
 ## VIA HTML token
 
-`src/annotate/via_image_annotator.html` is gitignored (generated). It
+`src/annomate/via_image_annotator.html` is gitignored (generated). It
 contains `__VIA_MCP_PORT__` as a literal token; `main()` substitutes the
 real port at startup before serving. Run `scripts/build_html.py` after
 `git submodule update` to regenerate it.

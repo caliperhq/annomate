@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from annotate.http_handler import make_handler
-from annotate.store import ProjectStore
+from annomate.http_handler import make_handler
+from annomate.store import ProjectStore
 
 
 FAKE_HTML = b"<html>port=__VIA_MCP_PORT__</html>"

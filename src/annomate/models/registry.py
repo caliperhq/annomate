@@ -23,8 +23,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable
 
-from annotate.models.base import Adapter, Capability, NotInstalledError
-from annotate.models.config import ModelsConfig, PipelineConfig
+from annomate.models.base import Adapter, Capability, NotInstalledError
+from annomate.models.config import ModelsConfig, PipelineConfig
 
 
 # Adapter class registry — populated by Phase 2+ as adapters are added.
@@ -136,7 +136,7 @@ class ModelRegistry:
         except ImportError as e:
             raise NotInstalledError(
                 f"Adapter for {cfg.model!r} needs a dep that isn't installed: {e}. "
-                f"Try: pip install 'annotate[ai]'"
+                f"Try: pip install 'annomate[ai]'"
             ) from e
 
         with self._lock:
@@ -149,7 +149,7 @@ class ModelRegistry:
         if not ai_extra_available():
             raise NotInstalledError(
                 "Local-model assistance requires the [ai] extra. Install with:\n"
-                "    pip install 'annotate[ai]'\n"
+                "    pip install 'annomate[ai]'\n"
                 f"(needed to load {cfg.model!r} for {cfg.task}.{cfg.name})"
             )
         factory = _factory_for(cfg.model)

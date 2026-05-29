@@ -1,8 +1,8 @@
 """TOML config for the model registry.
 
-Default location: ``~/.config/annotate/models.toml`` (XDG-respecting via
+Default location: ``~/.config/annomate/models.toml`` (XDG-respecting via
 ``platformdirs``). Auto-generated on first run with the small-default
-pipeline picks. Override the path via the ``ANNOTATE_MODELS_CONFIG``
+pipeline picks. Override the path via the ``ANNOMATE_MODELS_CONFIG``
 env var or ``--models-config`` CLI flag.
 """
 
@@ -26,7 +26,7 @@ else:  # pragma: no cover - covered by the conditional dep
 # we never round-trip via the parser; we write the string, then read what
 # we need.
 DEFAULT_CONFIG_TOML = """\
-# annotate model registry — auto-generated on first run.
+# annomate model registry — auto-generated on first run.
 # Edit pipelines, swap models, add finetunes. Reload by restarting the
 # server. See docs/design/2026-05-28-local-model-assistance.md for the
 # full schema.
@@ -41,7 +41,7 @@ model = "google/owlv2-large-patch14-ensemble"
 device = "auto"
 
 # YOLO-World — Apache 2.0, ~10x faster than GroundingDINO on CPU.
-# Needs the [yolo] extra: pip install 'annotate[yolo]'.
+# Needs the [yolo] extra: pip install 'annomate[yolo]'.
 [detect.fast]
 model = "ultralytics:yolov8s-worldv2"
 device = "auto"
@@ -67,7 +67,7 @@ device = "auto"
 # device = "auto"
 
 # ---- free-form Q&A about images (chat VLM) ----
-# Needs the [ai] + [chat] extras: pip install 'annotate[ai,chat]'.
+# Needs the [ai] + [chat] extras: pip install 'annomate[ai,chat]'.
 # Default is Qwen2.5-VL-3B (~6 GB on disk, Apache 2.0). Smaller picks:
 #   HuggingFaceTB/SmolVLM-Instruct   (~2 GB)
 #   HuggingFaceTB/SmolVLM-256M-Instruct  (~500 MB, weaker)
@@ -165,7 +165,7 @@ _TASK_TABLES = ("detect", "segment", "verify", "grade", "classify",
 
 def default_config_path() -> Path:
     """The on-disk location where defaults are written / read from."""
-    return Path(platformdirs.user_config_dir("annotate", appauthor=False)) / "models.toml"
+    return Path(platformdirs.user_config_dir("annomate", appauthor=False)) / "models.toml"
 
 
 def _parse(raw: dict, source: Path | None = None) -> ModelsConfig:
@@ -215,14 +215,14 @@ def load_config(path: Path | str | None = None, *, create_if_missing: bool = Tru
 
     Resolution order:
       1. Explicit ``path`` argument.
-      2. ``ANNOTATE_MODELS_CONFIG`` environment variable.
-      3. ``default_config_path()`` (~/.config/annotate/models.toml).
+      2. ``ANNOMATE_MODELS_CONFIG`` environment variable.
+      3. ``default_config_path()`` (~/.config/annomate/models.toml).
 
     If the resolved path doesn't exist and ``create_if_missing`` is true,
     the default TOML is written there and parsed.
     """
     if path is None:
-        env_path = os.environ.get("ANNOTATE_MODELS_CONFIG")
+        env_path = os.environ.get("ANNOMATE_MODELS_CONFIG")
         path = Path(env_path) if env_path else default_config_path()
     else:
         path = Path(path)

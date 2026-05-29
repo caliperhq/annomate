@@ -1,5 +1,5 @@
 """
-annotate server — HTTP (VIA push/pull) + MCP stdio in one process.
+annomate server — HTTP (VIA push/pull) + MCP stdio in one process.
 """
 
 import argparse
@@ -23,10 +23,10 @@ import mcp.server.stdio
 import mcp.types as types
 import platformdirs
 
-from annotate.store import ProjectStore
+from annomate.store import ProjectStore
 # Eager import: registers pillow-heif as a Pillow opener at import time
 # (when [io] is installed), so PIL.Image.open() handles HEIC everywhere.
-from annotate import image_io  # noqa: F401
+from annomate import image_io  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def _minimal_project() -> dict:
             "rev_timestamp": ts,
             "pname": "Untitled",
             "data_format_version": "3.1.1",
-            "creator": "annotate (https://github.com/caliperhq/annotate)",
+            "creator": "annomate (https://github.com/caliperhq/annomate)",
             "created": int(time.time() * 1000),
             "vid_list": [],
         },
@@ -458,7 +458,7 @@ def handle_add_file(
     port: int,
     path: str,
 ) -> list[types.TextContent]:
-    from annotate import image_io
+    from annomate import image_io
     abs_path = Path(path).resolve()
     if not abs_path.exists():
         return _text(f"File not found: {abs_path}")
@@ -468,7 +468,7 @@ def handle_add_file(
         if suffix in {".heic", ".heif", ".avif"}:
             return _text(
                 f"HEIC/HEIF/AVIF support needs the [io] extra: "
-                f"pip install 'annotate[io]'"
+                f"pip install 'annomate[io]'"
             )
         return _text(f"Unsupported image format: {suffix}")
 
@@ -491,7 +491,7 @@ def handle_add_file(
 
     fid = _next_id(project["file"])
     vid = _next_id(project["view"])
-    # abs_path is a annotate extension field; VIA ignores unknown keys
+    # abs_path is an annomate extension field; VIA ignores unknown keys
     project["file"][str(fid)] = {"fid": fid, "fname": fname, "type": 2, "loc": 2, "src": src, "abs_path": str(abs_path)}
     project["view"][str(vid)] = {"fid_list": [fid]}
     project["project"].setdefault("vid_list", []).append(str(vid))
@@ -812,7 +812,7 @@ def handle_load_document(
     ``source_pdf`` + ``source_pdf_page`` fields for traceability;
     these survive push/pull (VIA ignores unknown keys).
     """
-    from annotate import image_io
+    from annomate import image_io
     abs_path = Path(path).resolve()
     if not abs_path.exists():
         return _text(f"File not found: {abs_path}")
@@ -822,7 +822,7 @@ def handle_load_document(
             f"via_load_document currently supports PDF only; got {abs_path.suffix!r}."
         )
     if not image_io.pdf_available():
-        return _text("PDF support needs the [io] extra: pip install 'annotate[io]'")
+        return _text("PDF support needs the [io] extra: pip install 'annomate[io]'")
 
     try:
         page_count = image_io.pdf_page_count(abs_path)
@@ -908,10 +908,10 @@ def handle_run_ocr(
     ``via_suggest_regions`` so the LLM can review them with the same
     flow.
     """
-    from annotate import image_io
+    from annomate import image_io
     if not image_io.ocr_available():
         return _text(
-            "OCR support needs the [ocr] extra: pip install 'annotate[ocr]'. "
+            "OCR support needs the [ocr] extra: pip install 'annomate[ocr]'. "
             "You'll also need the tesseract CLI on PATH "
             "(apt: tesseract-ocr; brew: tesseract; emerge: app-text/tesseract)."
         )
@@ -999,7 +999,7 @@ def handle_read_metadata(
     """Return EXIF / XMP / IPTC metadata for a file. Uses ExifTool when
     available, falls back to Pillow's `_getexif()` for JPEG/TIFF/HEIC.
     """
-    from annotate import image_io
+    from annomate import image_io
     project = store.get()
     if project is None:
         return _text("No project loaded.")
@@ -1040,7 +1040,7 @@ def handle_model_status(registry) -> list[types.TextContent]:
             "ai_extra_available": False,
             "loaded": [],
             "configured_pipelines": [],
-            "hint": "Local-model assistance is disabled. Install with: pip install 'annotate[ai]'",
+            "hint": "Local-model assistance is disabled. Install with: pip install 'annomate[ai]'",
         }, indent=2))
     return _text(json.dumps(registry.status(), indent=2))
 
@@ -1052,7 +1052,7 @@ def handle_capabilities(store: ProjectStore, registry) -> list[types.TextContent
 
     try:
         from importlib.metadata import version as _pkg_ver
-        server_version = _pkg_ver("annotate")
+        server_version = _pkg_ver("annomate")
     except Exception:
         server_version = "dev"
 
@@ -1107,7 +1107,7 @@ def _ai_stub_response(tool_name: str, registry, reason: str | None = None) -> li
     enough context for the LLM to either suggest an install or pick a
     different pipeline.
     """
-    from annotate.models import ai_extra_available
+    from annomate.models import ai_extra_available
 
     msg = {
         "tool": tool_name,
@@ -1119,7 +1119,7 @@ def _ai_stub_response(tool_name: str, registry, reason: str | None = None) -> li
         "ai_extra_installed": ai_extra_available(),
     }
     if not msg["ai_extra_installed"]:
-        msg["install_hint"] = "pip install 'annotate[ai]'"
+        msg["install_hint"] = "pip install 'annomate[ai]'"
     if registry is not None:
         msg["registered_adapter_prefixes"] = registry.status()["registered_adapter_prefixes"]
         msg["configured_pipelines"] = registry.status()["configured_pipelines"]
@@ -1194,8 +1194,8 @@ def handle_suggest_regions(
     min_confidence: float = 0.3,
     pipeline: str | None = None,
 ) -> list[types.TextContent]:
-    from annotate.models import NotInstalledError
-    from annotate.models.tiling import (
+    from annomate.models import NotInstalledError
+    from annomate.models.tiling import (
         DEFAULT_BROAD_PROMPTS, CandidateBox, auto_grid, filter_existing,
         generate_tiles, nms_merge, parse_grid,
     )
@@ -1219,7 +1219,7 @@ def handle_suggest_regions(
     # Eager-import adapter modules so their factories are registered.
     # Safe even without [ai] — the modules don't import torch at module load.
     try:
-        from annotate.models import grounding_dino  # noqa: F401
+        from annomate.models import grounding_dino  # noqa: F401
     except ImportError:
         pass
 
@@ -1309,9 +1309,9 @@ def handle_suggest_regions(
 def _adaptive_tiles(image, registry, notes: list):
     """Try to build a saliency-driven tile set. Returns None on failure
     (caller falls back to auto-grid)."""
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
     try:
-        from annotate.models import saliency as _saliency_mod  # noqa: F401
+        from annomate.models import saliency as _saliency_mod  # noqa: F401
     except ImportError:
         return None
     try:
@@ -1348,7 +1348,7 @@ def handle_tighten_region(
     auto_apply: bool = False,
     pipeline: str | None = None,
 ) -> list[types.TextContent]:
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_tighten_region", None,
@@ -1380,7 +1380,7 @@ def handle_tighten_region(
 
     # Eager-import segment adapters
     try:
-        from annotate.models import sam2  # noqa: F401
+        from annomate.models import sam2  # noqa: F401
     except ImportError:
         pass
 
@@ -1445,7 +1445,7 @@ def handle_grade_annotations(
     mids: list[str] | None = None,
     pipeline: str | None = None,
 ) -> list[types.TextContent]:
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_grade_annotations", None,
@@ -1480,7 +1480,7 @@ def handle_grade_annotations(
 
     # Eager-import grader adapters
     try:
-        from annotate.models import clip_grader  # noqa: F401
+        from annomate.models import clip_grader  # noqa: F401
     except ImportError:
         pass
 
@@ -1558,7 +1558,7 @@ def handle_verify_region(
     metadata_id: str,
     pipeline: str | None = None,
 ) -> list[types.TextContent]:
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_verify_region", None,
@@ -1599,8 +1599,8 @@ def handle_verify_region(
     crop = img.crop((cx0, cy0, cx1, cy1))
 
     try:
-        from annotate.models import chat_vlm  # noqa: F401  (registers Qwen/SmolVLM verify)
-        from annotate.models import florence2  # noqa: F401  (registers Florence-2 if configured)
+        from annomate.models import chat_vlm  # noqa: F401  (registers Qwen/SmolVLM verify)
+        from annomate.models import florence2  # noqa: F401  (registers Florence-2 if configured)
     except ImportError:
         pass
 
@@ -1646,7 +1646,7 @@ def handle_classify_scene(
     cache: bool = True,
     pipeline: str | None = None,
 ) -> list[types.TextContent]:
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_classify_scene", None,
@@ -1660,7 +1660,7 @@ def handle_classify_scene(
 
     # Eager-import classifier adapters (CLIP serves classify + grade).
     try:
-        from annotate.models import clip_grader  # noqa: F401
+        from annomate.models import clip_grader  # noqa: F401
     except ImportError:
         pass
 
@@ -1740,7 +1740,7 @@ def handle_ask_model(
     per ``xy_space``) or ``metadata_id=`` to use an existing region's
     bbox. Omit both to ask about the full image.
     """
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_ask_model", None,
@@ -1792,7 +1792,7 @@ def handle_ask_model(
         used_window_pixel = [0, 0, W, H]
 
     try:
-        from annotate.models import chat_vlm  # noqa: F401
+        from annomate.models import chat_vlm  # noqa: F401
     except ImportError:
         pass
 
@@ -1837,7 +1837,7 @@ def handle_find_similar(
     """Use a labelled region as a visual prompt; return similar regions
     from each target image. If ``target_fids`` is omitted, searches the
     reference's own image."""
-    from annotate.models import NotInstalledError
+    from annomate.models import NotInstalledError
 
     if registry is None:
         return _ai_stub_response("via_find_similar", None,
@@ -1873,7 +1873,7 @@ def handle_find_similar(
         target_images[tfid] = timg
 
     try:
-        from annotate.models import yoloe  # noqa: F401
+        from annomate.models import yoloe  # noqa: F401
     except ImportError:
         pass
 
@@ -1918,7 +1918,7 @@ def handle_find_similar(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="annotate: MCP server + VIA image annotator on localhost"
+        description="annomate: MCP server + VIA image annotator on localhost"
     )
     parser.add_argument(
         "--port",
@@ -1938,9 +1938,9 @@ def main():
     )
     parser.add_argument(
         "--models-config",
-        default=os.environ.get("ANNOTATE_MODELS_CONFIG"),
-        help="Path to models.toml (env: ANNOTATE_MODELS_CONFIG; "
-             "default: ~/.config/annotate/models.toml, auto-generated on first run)",
+        default=os.environ.get("ANNOMATE_MODELS_CONFIG"),
+        help="Path to models.toml (env: ANNOMATE_MODELS_CONFIG; "
+             "default: ~/.config/annomate/models.toml, auto-generated on first run)",
     )
     parser.add_argument(
         "--no-ai",
@@ -1953,16 +1953,16 @@ def main():
         state_file = Path(args.state_file)
     else:
         state_file = Path(
-            platformdirs.user_data_dir("annotate", appauthor=False)
+            platformdirs.user_data_dir("annomate", appauthor=False)
         ) / "project_state.json"
 
     html_template = (
-        files("annotate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
+        files("annomate").joinpath("via_image_annotator.html").read_text(encoding="utf-8")
     )
 
     store = ProjectStore(state_file=state_file)
 
-    from annotate.http_handler import make_handler
+    from annomate.http_handler import make_handler
     # Bind with port 0 so the OS assigns a free port, then patch html_content
     # with the actual port before the first request is served.
     # Rebuild image registry from persisted project (survives server restart)
@@ -1977,7 +1977,7 @@ def main():
     try:
         httpd = HTTPServer(("127.0.0.1", args.port), handler_cls)
     except OSError as e:
-        print(f"annotate: cannot bind port {args.port}: {e}", file=sys.stderr)
+        print(f"annomate: cannot bind port {args.port}: {e}", file=sys.stderr)
         sys.exit(1)
     actual_port = httpd.server_address[1]
 
@@ -2001,11 +2001,11 @@ def main():
         if changed:
             store.set_project(existing)
             print(
-                f"annotate: healed stale src URLs to port {actual_port}",
+                f"annomate: healed stale src URLs to port {actual_port}",
                 file=sys.stderr,
             )
     auto_pull_script = f"""<script>
-/* annotate: auto-load server project when VIA opens empty */
+/* annomate: auto-load server project when VIA opens empty */
 (async function() {{
   try {{
     if (Object.keys(via.d.store.file).length > 0) return;
@@ -2030,23 +2030,23 @@ def main():
     registry = None
     if not args.no_ai:
         try:
-            from annotate.models import ModelRegistry, load_config
+            from annomate.models import ModelRegistry, load_config
             registry = ModelRegistry(load_config(args.models_config))
             print(
-                f"annotate: model registry loaded "
+                f"annomate: model registry loaded "
                 f"({len(registry.config.pipelines)} pipelines from "
                 f"{registry.config.source_path or 'builtin defaults'})",
                 file=sys.stderr,
             )
         except Exception as e:
-            print(f"annotate: model registry init failed ({e}); AI tools disabled", file=sys.stderr)
+            print(f"annomate: model registry init failed ({e}); AI tools disabled", file=sys.stderr)
             registry = None
 
     asyncio.run(_run_mcp(store, annotator_url, actual_port, image_registry, registry))
 
 
 async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_registry: dict, registry=None) -> None:
-    mcp_server = mcp.server.Server("annotate")
+    mcp_server = mcp.server.Server("annomate")
 
     @mcp_server.list_tools()
     async def list_tools() -> list[types.Tool]:
