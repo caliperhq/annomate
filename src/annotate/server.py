@@ -2111,8 +2111,9 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 description=(
                     "Add one annotation region. xy encoding: rectangle=[2,x,y,w,h], "
                     "point=[1,x,y], circle=[3,cx,cy,r], polygon=[7,x1,y1,x2,y2,...]. "
-                    "Coordinates default to original pixel space; pass xy_space='fraction' "
-                    "to use 0.0–1.0 values that the server scales by the original image dims. "
+                    "Default xy_space='fraction': pass 0.0–1.0 values the server scales "
+                    "by the original image dims — lower error rate than pixel arithmetic. "
+                    "Use xy_space='original' only when you already have pixel coordinates. "
                     "av keys may be attribute IDs ('1','2',...) or anames ('label','description'); "
                     "unknown keys are rejected (use via_get_project to see the schema)."
                 ),
@@ -2125,9 +2126,9 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "av": {"type": "object", "description": "Attribute key-value pairs (strings)", "additionalProperties": {"type": "string"}},
                         "xy_space": {
                             "type": "string",
-                            "enum": ["original", "fraction"],
-                            "description": "'original' = pixel coords (default); 'fraction' = 0.0–1.0 of original dims",
-                            "default": "original",
+                            "enum": ["fraction", "original"],
+                            "description": "'fraction' (default) — coords are 0.0–1.0 of the original dims, server scales for you. Lower error rate than pixel arithmetic. 'original' — coords in original pixel space.",
+                            "default": "fraction",
                         },
                     },
                     "required": ["vid", "z", "xy", "av"],
@@ -2148,8 +2149,8 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                         "av": {"type": "object", "additionalProperties": {"type": "string"}},
                         "xy_space": {
                             "type": "string",
-                            "enum": ["original", "fraction"],
-                            "default": "original",
+                            "enum": ["fraction", "original"],
+                            "default": "fraction",
                         },
                     },
                     "required": ["metadata_id", "z", "xy", "av"],
@@ -2559,7 +2560,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
-                    xy_space=arguments.get("xy_space", "original"),
+                    xy_space=arguments.get("xy_space", "fraction"),
                 )
             if name == "via_update_region":
                 return handle_update_region(
@@ -2568,7 +2569,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                     z=arguments["z"],
                     xy=arguments["xy"],
                     av=arguments["av"],
-                    xy_space=arguments.get("xy_space", "original"),
+                    xy_space=arguments.get("xy_space", "fraction"),
                 )
             if name == "via_delete_region":
                 return handle_delete_region(store, metadata_id=arguments["metadata_id"])

@@ -40,26 +40,26 @@ one.
 Default to rectangle only when the feature is genuinely rectangular or
 when no other shape obviously fits.
 
-## Coordinate space — prefer `xy_space="fraction"`
+## Coordinate space — use `xy_space="fraction"` (default)
 
-`via_add_region` and `via_update_region` accept an optional `xy_space`:
+`via_add_region` and `via_update_region` default to `xy_space="fraction"`.
 
-- `"fraction"` — coords are 0.0–1.0 fractions of the original dims;
-  the server scales them for you. **Prefer this** — every multi-region
-  session that used fractions has hit zero arithmetic errors. Read
-  positions off the returned image proportionally ("about 40% from
-  the left, 60% down") and pass the fractions through. Rect `w`/`h`
-  and ellipse `rx`/`ry` scale per-axis; circle `r` scales by the
-  geometric mean.
-- `"original"` (default) — coords in `xy` are pixels in the *original*
-  image. Kept as the default for back-compat; you have to do the
-  returned-px-to-original-px multiplication yourself.
+- `"fraction"` **(default)** — coords are 0.0–1.0 fractions of the
+  original dims; the server scales them. Every multi-region session
+  using fractions has hit zero arithmetic errors. Read positions off
+  the returned image proportionally ("about 40% from the left, 60%
+  down") and pass the fractions directly. Rect `w`/`h` and ellipse
+  `rx`/`ry` scale per-axis; circle `r` scales by the geometric mean.
+- `"original"` — coords in `xy` are pixels in the *original* image.
+  You must do the returned-px-to-original-px multiplication yourself:
+  `original_x = returned_x × (original_w / returned_w)`.
+  Use only when you already have original-pixel coordinates to hand.
 
 **If you must use `"original"`:**
 Returned image 1024×683, original 4651×3101. A feature observed at
 returned (500, 300) is at original
 `(500 × 4651/1024, 300 × 3101/683)` ≈ `(2271, 1362)`. Multiply per
-axis by `original_dim / returned_dim`. Or just use
+axis by `original_dim / returned_dim`. Or just use the default
 `xy_space="fraction"` and pass `(500/1024, 300/683)` ≈
 `(0.488, 0.439)` — same destination, no arithmetic.
 

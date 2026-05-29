@@ -79,9 +79,11 @@ For the recurring failure modes that even a careful loop misses, read
 | Load an image into the project | `via_add_file` |
 | **See the image you're annotating** | `via_get_image` |
 | Zoom into a sub-region at full res | `via_get_image_crop` |
+| Environment inventory (version, extras, pipelines) | `via_capabilities` |
 | Orient to project | `via_get_project` |
 | Quick file list | `via_list_files` |
-| Read annotations | `via_get_annotations` |
+| Read annotations (summary) | `via_get_annotations` |
+| Read annotations for one view | `via_get_annotations(vid=<vid>)` |
 | Add one region | `via_add_region` |
 | Fix an annotation | `via_update_region` |
 | Remove an annotation | `via_delete_region` |
@@ -111,12 +113,15 @@ they return a structured `install_hint` rather than erroring. Call
 how to use them and the typical AI-assisted flow, read
 [ai-tools.md](ai-tools.md).
 
-Prefer `via_get_annotations` over `via_get_project` for reads — it
-returns only metadata, not the full project blob. After the user
-corrects placements in the browser, call
-`via_get_annotations(format="fraction")` to get coords as 0–1
-fractions — easier to diff against your originals than raw pixels,
-and forces the calibration arithmetic onto the server.
+Prefer `via_get_annotations(vid=<vid>)` over `via_get_project` for
+reading a specific view's annotations — it returns only that view's
+metadata. `via_get_annotations` without `vid` gives a lightweight
+per-file summary (region counts + label lists). The default format
+is `"fraction"` — 0–1 coords that diff cleanly against your own
+placements without pixel arithmetic.
+
+Call `via_capabilities` once at session start to fill the
+`annotator_version` / `extras` fields in `.training/` frontmatter.
 
 ## Loading images
 
