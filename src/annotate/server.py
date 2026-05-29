@@ -277,18 +277,59 @@ def handle_get_annotations(
     store: ProjectStore,
     image_registry: dict,
     vid: str | None,
-    format: str = "pixel",
+    format: str = "fraction",
 ) -> list[types.TextContent]:
     project = store.get()
     if project is None:
         return _text("No project loaded.")
     if format not in ("pixel", "fraction", "both"):
         return _text(f"format must be 'pixel', 'fraction', or 'both', got {format!r}")
+
     metadata = project.get("metadata", {})
-    if vid is not None:
-        metadata = {mid: m for mid, m in metadata.items() if m.get("vid") == vid}
+
+    if vid is None:
+        # Summary mode: per-file region counts + label lists
+        files = project.get("file", {})
+        views = project.get("view", {})
+
+        fid_to_vid: dict[str, str] = {}
+        for v_id, v in views.items():
+            for fid in v.get("fid_list", []):
+                fid_to_vid[str(fid)] = v_id
+
+        vid_stats: dict[str, dict] = {}
+        for mid, m in metadata.items():
+            v = m.get("vid", "")
+            if v not in vid_stats:
+                vid_stats[v] = {"region_count": 0, "labels": []}
+            vid_stats[v]["region_count"] += 1
+            label = (m.get("av") or {}).get("1", "")
+            if label and label not in vid_stats[v]["labels"]:
+                vid_stats[v]["labels"].append(label)
+
+        files_summary = []
+        for fid, f in files.items():
+            v_id = fid_to_vid.get(fid, "")
+            stats = vid_stats.get(v_id, {"region_count": 0, "labels": []})
+            files_summary.append({
+                "fid": fid,
+                "vid": v_id,
+                "fname": f.get("fname", ""),
+                "region_count": stats["region_count"],
+                "labels": sorted(stats["labels"]),
+            })
+
+        return _text(json.dumps({
+            "total_regions": len(metadata),
+            "files": files_summary,
+            "note": "Pass vid=<vid> to get full annotations for a specific view.",
+        }, indent=2))
+
+    # Per-view full annotations
+    metadata = {mid: m for mid, m in metadata.items() if m.get("vid") == vid}
     if format == "pixel":
         return _text(json.dumps(metadata, indent=2))
+
     # 'fraction' or 'both' — resolve dims per region via its vid's fid_list
     dims_cache: dict[str, tuple[int, int] | None] = {}
 
@@ -305,9 +346,7 @@ def handle_get_annotations(
         v = m.get("vid", "")
         d = dims_for(v)
         if d is None:
-            # dims unavailable — keep pixel coords and flag it
-            entry = {**m, "_dims_unavailable": True}
-            out[mid] = entry
+            out[mid] = {**m, "_dims_unavailable": True}
             continue
         w, h = d
         frac_xy = _xy_to_fraction(m.get("xy") or [], w, h)
@@ -1989,21 +2028,22 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
             types.Tool(
                 name="via_get_annotations",
                 description=(
-                    "Return all annotation metadata, optionally filtered by view ID. "
-                    "format='pixel' (default) returns coords in original pixel space; "
-                    "'fraction' returns coords as 0–1 fractions of the original dims "
-                    "(useful for diffing your placements against user corrections "
-                    "without manual arithmetic); 'both' returns pixels plus an extra "
-                    "xy_fraction field per region."
+                    "Return annotation metadata. Without vid: returns a per-file summary "
+                    "(region counts + label lists) — lightweight for orientation. "
+                    "Pass vid=<vid> to get full annotations for that view. "
+                    "format='fraction' (default) returns coords as 0–1 fractions — "
+                    "preferred for all read-back and diffing; 'pixel' for raw original-"
+                    "space coords; 'both' adds an xy_fraction field alongside pixel xy."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "vid": {"type": "string", "description": "View ID to filter by (omit for all)"},
+                        "vid": {"type": "string", "description": "View ID (omit for per-file summary)"},
                         "format": {
                             "type": "string",
                             "enum": ["pixel", "fraction", "both"],
-                            "default": "pixel",
+                            "default": "fraction",
+                            "description": "Coordinate format for full-view reads (ignored for summary)",
                         },
                     },
                     "required": [],
@@ -2441,7 +2481,7 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 return handle_get_annotations(
                     store, image_registry,
                     vid=arguments.get("vid"),
-                    format=arguments.get("format", "pixel"),
+                    format=arguments.get("format", "fraction"),
                 )
             if name == "via_add_region":
                 return handle_add_region(

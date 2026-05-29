@@ -107,13 +107,23 @@ def test_get_annotations_no_project(store):
 
 
 def test_get_annotations_returns_all(loaded_store):
-    result = handle_get_annotations(loaded_store, {}, vid=None)
+    # vid=None returns summary; use vid="1" for full annotations
+    result = handle_get_annotations(loaded_store, {}, vid="1", format="pixel")
     data = json.loads(_text(result))
     assert "abc12345" in data
 
 
+def test_get_annotations_no_vid_returns_summary(loaded_store):
+    result = handle_get_annotations(loaded_store, {}, vid=None)
+    data = json.loads(_text(result))
+    assert "total_regions" in data
+    assert "files" in data
+    assert "note" in data
+    assert "abc12345" not in data
+
+
 def test_get_annotations_filtered_by_vid(loaded_store):
-    result = handle_get_annotations(loaded_store, {}, vid="2")
+    result = handle_get_annotations(loaded_store, {}, vid="2", format="pixel")
     data = json.loads(_text(result))
     assert "abc12345" not in data  # belongs to vid="1"
     assert data == {}
@@ -134,7 +144,7 @@ def test_get_annotations_fraction_format(store, tmp_path):
     handle_add_region(store, registry, vid="1", z=[],
                       xy=[2, 1000, 500, 200, 400], av={"label": "r"})
 
-    result = handle_get_annotations(store, registry, vid=None, format="fraction")
+    result = handle_get_annotations(store, registry, vid="1", format="fraction")
     data = json.loads(_text(result))
     [region] = data.values()
     xy = region["xy"]
@@ -156,12 +166,19 @@ def test_get_annotations_both_format(store, tmp_path):
     handle_add_region(store, registry, vid="1", z=[],
                       xy=[2, 1000, 500, 200, 400], av={"label": "r"})
 
-    result = handle_get_annotations(store, registry, vid=None, format="both")
+    result = handle_get_annotations(store, registry, vid="1", format="both")
     data = json.loads(_text(result))
     [region] = data.values()
     assert region["xy"] == [2, 1000, 500, 200, 400]
     assert region["xy_fraction"][1] == pytest.approx(0.25)
     assert region["dims"] == [4000, 2000]
+
+
+def test_get_annotations_with_vid_returns_full(loaded_store):
+    result = handle_get_annotations(loaded_store, {}, vid="1", format="pixel")
+    data = json.loads(_text(result))
+    assert "abc12345" in data
+    assert data["abc12345"]["vid"] == "1"
 
 
 # --- via_add_region ---
