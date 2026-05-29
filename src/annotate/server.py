@@ -1045,6 +1045,63 @@ def handle_model_status(registry) -> list[types.TextContent]:
     return _text(json.dumps(registry.status(), indent=2))
 
 
+def handle_capabilities(store: ProjectStore, registry) -> list[types.TextContent]:
+    """Return a full inventory: server version, extras, binaries, AI pipelines."""
+    import shutil
+    import sys
+
+    try:
+        from importlib.metadata import version as _pkg_ver
+        server_version = _pkg_ver("annotate")
+    except Exception:
+        server_version = "dev"
+
+    def _has(pkg: str) -> bool:
+        try:
+            __import__(pkg)
+            return True
+        except ImportError:
+            return False
+
+    extras = {
+        "ai": _has("torch"),
+        "io": _has("pillow_heif") or _has("pdf2image"),
+        "ocr": _has("pytesseract"),
+        "yolo": _has("ultralytics"),
+        "chat": _has("qwen_vl_utils"),
+    }
+
+    system_binaries = {
+        "exiftool": shutil.which("exiftool") is not None,
+        "tesseract": shutil.which("tesseract") is not None,
+        "poppler_utils": shutil.which("pdftoppm") is not None,
+    }
+
+    project = store.get()
+    project_summary = None
+    if project is not None:
+        project_summary = {
+            "pid": project["project"].get("pid"),
+            "rev": project["project"].get("rev"),
+            "file_count": len(project.get("file", {})),
+            "region_count": len(project.get("metadata", {})),
+        }
+
+    response = {
+        "server_version": server_version,
+        "python_version": sys.version,
+        "extras": extras,
+        "system_binaries": system_binaries,
+        "ai_pipelines": registry.status()["configured_pipelines"] if registry is not None else [],
+        "project": project_summary,
+        "note": (
+            "annotator_version field for .training/ files: use this server_version. "
+            "ai_pipelines lists configured (not necessarily loaded) pipelines."
+        ),
+    }
+    return _text(json.dumps(response, indent=2))
+
+
 def _ai_stub_response(tool_name: str, registry, reason: str | None = None) -> list[types.TextContent]:
     """Returned by AI tools whose adapter isn't available yet. Carries
     enough context for the LLM to either suggest an install or pick a
@@ -2282,6 +2339,18 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 inputSchema={"type": "object", "properties": {}, "required": []},
             ),
             types.Tool(
+                name="via_capabilities",
+                description=(
+                    "Return the complete environment inventory: server version, which "
+                    "optional extras are installed ([ai], [io], [ocr], [yolo], [chat]), "
+                    "which system binaries are on PATH (exiftool, tesseract, poppler), "
+                    "configured AI pipelines, and current project state. "
+                    "Call once at session start to fill .training/ file frontmatter "
+                    "and to know which tools are actually usable."
+                ),
+                inputSchema={"type": "object", "properties": {}, "required": []},
+            ),
+            types.Tool(
                 name="via_suggest_regions",
                 description=(
                     "[Phase 2] Open-vocabulary detection: given text prompts, "
@@ -2542,6 +2611,8 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_model_status":
                 return handle_model_status(registry)
+            if name == "via_capabilities":
+                return handle_capabilities(store, registry)
             if name == "via_suggest_regions":
                 return handle_suggest_regions(
                     store, image_registry, registry,

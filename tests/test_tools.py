@@ -1489,6 +1489,36 @@ def test_main_heals_stale_src_urls(tmp_path, monkeypatch):
 
 # --- Florence-2 config compat patch ---
 
+# --- via_capabilities ---
+
+def test_capabilities_returns_expected_structure(store):
+    from annotate.server import handle_capabilities
+    result = handle_capabilities(store, registry=None)
+    data = json.loads(_text(result))
+    assert "server_version" in data
+    assert "python_version" in data
+    assert "extras" in data
+    assert set(data["extras"].keys()) >= {"ai", "io", "ocr", "yolo", "chat"}
+    assert all(isinstance(v, bool) for v in data["extras"].values())
+    assert "system_binaries" in data
+    assert set(data["system_binaries"].keys()) >= {"exiftool", "tesseract", "poppler_utils"}
+    assert all(isinstance(v, bool) for v in data["system_binaries"].values())
+    assert "ai_pipelines" in data
+    assert data["ai_pipelines"] == []
+
+
+def test_capabilities_with_registry_includes_pipelines(store):
+    from annotate.server import handle_capabilities
+    from annotate.models import ModelRegistry, default_config
+    reg = ModelRegistry(default_config())
+    result = handle_capabilities(store, registry=reg)
+    data = json.loads(_text(result))
+    assert isinstance(data["ai_pipelines"], list)
+    assert len(data["ai_pipelines"]) > 0
+
+
+# --- Florence-2 config compat patch ---
+
 def test_florence2_compat_patch_wraps_init():
     """_patch_florence2_config_compat wraps __init__ to inject forced_bos_token_id."""
     from annotate.models.florence2 import Florence2Adapter
