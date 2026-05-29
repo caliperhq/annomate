@@ -87,6 +87,7 @@ For the recurring failure modes that even a careful loop misses, read
 | Remove an annotation | `via_delete_region` |
 | Bulk / wholesale changes | `via_update_project` |
 | Save project JSON to disk | `via_save_project` |
+| Read EXIF / GPS / camera metadata | `via_read_metadata` |
 
 ### Local-model assistance (optional; needs `pip install 'annotate[ai]'`)
 
@@ -136,6 +137,17 @@ don't guess, use `realpath` or `find` if uncertain.
 If no project is loaded yet, `via_add_file` creates a minimal empty
 one automatically, with a default `label` + `description` attribute
 schema already installed.
+
+**Format support.** Pillow-native formats (jpg, png, gif, webp, bmp,
+tiff) work out of the box. HEIC / HEIF / AVIF (default iPhone-camera
+format) need the `[io]` extra: `pip install 'annotate[io]'`.
+Non-browser-native formats (HEIC, BMP, TIFF) are converted once to
+JPEG and cached at `~/.cache/annotate/converted/` for browser
+display — the cache invalidates automatically when the source file's
+mtime changes. The original file path stays authoritative in the
+project; AI tools operate on the original. Other formats (RAW, PDF,
+video, GeoTIFF, DICOM, PSD, gigapixel TIFF) are designed but not yet
+implemented — see `docs/design/2026-05-28-format-conversion-and-tooling.md`.
 
 ## Viewing images
 

@@ -80,7 +80,9 @@ spring; "morning" at the equator is different from the same hour at
 60° N. When your prior depends on lighting, shadow direction, or sky
 colour from a timestamp, check season + latitude before committing —
 otherwise the clock-face overrides the actual photometry visible in
-the image.
+the image. **Call `via_read_metadata(fid)` at session start** — it
+returns capture timestamp + GPS in one call, which is enough to fix
+the priors before you place anything.
 
 ## Verification discipline
 

@@ -24,6 +24,9 @@ import mcp.types as types
 import platformdirs
 
 from annotate.store import ProjectStore
+# Eager import: registers pillow-heif as a Pillow opener at import time
+# (when [io] is installed), so PIL.Image.open() handles HEIC everywhere.
+from annotate import image_io  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -379,11 +382,18 @@ def handle_add_file(
     port: int,
     path: str,
 ) -> list[types.TextContent]:
+    from annotate import image_io
     abs_path = Path(path).resolve()
     if not abs_path.exists():
         return _text(f"File not found: {abs_path}")
-    suffix = abs_path.suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"}:
+    klass = image_io.detect(abs_path)
+    if klass is image_io.LoaderClass.UNKNOWN:
+        suffix = abs_path.suffix.lower()
+        if suffix in {".heic", ".heif", ".avif"}:
+            return _text(
+                f"HEIC/HEIF/AVIF support needs the [io] extra: "
+                f"pip install 'annotate[io]'"
+            )
         return _text(f"Unsupported image format: {suffix}")
 
     project = store.get()
@@ -706,6 +716,49 @@ def handle_save_project(store: ProjectStore, path: str) -> list[types.TextConten
         return _text(f"Directory not found: {p.parent}")
     p.write_text(json.dumps(project, indent=2), encoding="utf-8")
     return _text(f"Saved to {p}")
+
+
+# ---------------------------------------------------------------------------
+# IO layer — metadata reader
+# ---------------------------------------------------------------------------
+
+def handle_read_metadata(
+    store: ProjectStore,
+    image_registry_map: dict,
+    fid: str,
+) -> list[types.TextContent]:
+    """Return EXIF / XMP / IPTC metadata for a file. Uses ExifTool when
+    available, falls back to Pillow's `_getexif()` for JPEG/TIFF/HEIC.
+    """
+    from annotate import image_io
+    project = store.get()
+    if project is None:
+        return _text("No project loaded.")
+    file_entry = project.get("file", {}).get(str(fid))
+    if file_entry is None:
+        return _text(f"File ID {fid!r} not found.")
+    abs_path = file_entry.get("abs_path") or image_registry_map.get(file_entry.get("fname", ""))
+    if not abs_path:
+        return _text(f"Image path not available for fid={fid}.")
+    if not Path(abs_path).exists():
+        return _text(f"Image file not found at {abs_path}")
+
+    meta = image_io.open_metadata(abs_path)
+    # Drop the raw blob from the default response — keep the structured
+    # fields the LLM actually needs. Users can ask for it explicitly.
+    payload = {
+        "fid": fid,
+        "fname": file_entry.get("fname"),
+        "source": meta.source,
+        "capture_time": meta.capture_time,
+        "gps": meta.gps,
+        "camera": meta.camera,
+        "lens": meta.lens,
+        "exposure": meta.exposure,
+        "orientation": meta.orientation,
+        "dims": [meta.width, meta.height] if meta.width and meta.height else None,
+    }
+    return _text(json.dumps(payload, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -1836,6 +1889,25 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 },
             ),
             types.Tool(
+                name="via_read_metadata",
+                description=(
+                    "Read EXIF / XMP / IPTC metadata from an image: capture "
+                    "time, GPS, camera, lens, exposure, orientation, dims. "
+                    "Prefers the `exiftool` CLI (full coverage) when "
+                    "available on PATH; falls back to Pillow's built-in EXIF "
+                    "reader. Useful at session start to ground priors — a "
+                    "capture timestamp + GPS can prevent a whole class of "
+                    "lighting / season / location prior failures."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "fid": {"type": "string"},
+                    },
+                    "required": ["fid"],
+                },
+            ),
+            types.Tool(
                 name="via_save_project",
                 description="Write the current project JSON to a file on disk. Use when the user asks to save or export their work.",
                 inputSchema={
@@ -2099,6 +2171,8 @@ async def _run_mcp(store: ProjectStore, annotator_url: str, port: int, image_reg
                 )
             if name == "via_save_project":
                 return handle_save_project(store, path=arguments["path"])
+            if name == "via_read_metadata":
+                return handle_read_metadata(store, image_registry, fid=arguments["fid"])
             if name == "via_model_status":
                 return handle_model_status(registry)
             if name == "via_suggest_regions":

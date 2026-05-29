@@ -38,6 +38,12 @@ geometry is fine.
 **"Save this work"**
 → `via_save_project("/path/to/output.json")`.
 
+**"When was this photo taken?" / "What camera / lens / GPS?"**
+→ `via_read_metadata(fid)`. Returns capture time, GPS, camera, lens,
+exposure, orientation, dims. Run at session start on each new file
+to ground priors — a capture timestamp + GPS catches a whole class
+of lighting / season / location prior failures.
+
 ## Verification + diff
 
 **"That box looks off — let me check"**

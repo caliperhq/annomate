@@ -41,6 +41,14 @@ yolo = [
 chat = [
     "qwen-vl-utils>=0.0.8",
 ]
+# Format-conversion + metadata layer. Lets via_add_file accept formats
+# Pillow doesn't handle natively (HEIC/HEIF/AVIF). via_read_metadata
+# prefers ExifTool when the `exiftool` CLI is on PATH; falls back to
+# Pillow EXIF otherwise.
+io = [
+    "pillow-heif>=1.3",
+    "PyExifTool>=0.5",
+]
 
 [project.scripts]
 annotate = "annotate.server:main"
