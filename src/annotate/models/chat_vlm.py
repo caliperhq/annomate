@@ -193,7 +193,7 @@ class ChatVlmAdapter(Adapter):
         """
         answer = self.ask(
             image_crop,
-            "Identify what is in this image.",
+            "What do you see?",
             max_new_tokens=200,
         )
         caption = answer.text

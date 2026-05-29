@@ -1599,7 +1599,8 @@ def handle_verify_region(
     crop = img.crop((cx0, cy0, cx1, cy1))
 
     try:
-        from annotate.models import florence2  # noqa: F401
+        from annotate.models import chat_vlm  # noqa: F401  (registers Qwen/SmolVLM verify)
+        from annotate.models import florence2  # noqa: F401  (registers Florence-2 if configured)
     except ImportError:
         pass
 
