@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "via": {
-      "command": "/home/mike/.local/annotate/bin/annotate"
-    }
-  }
-}
