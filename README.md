@@ -31,36 +31,42 @@ All optional features advertise themselves on the MCP tool surface even when
 their dependencies aren't installed — they return a structured install hint
 instead of erroring.
 
-## Install
+## Install &amp; setup
 
-### Base (annotation server only)
+### Quickstart (recommended)
+
+Requires [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+No venv needed — `uvx` handles isolation automatically.
+
+```bash
+claude mcp add annomate uvx --from annomate-mcp annomate
+```
+
+With optional extras (e.g. local AI models + format conversion):
+
+```bash
+claude mcp add annomate -- uvx --from 'annomate-mcp[ai,io]' annomate
+```
+
+### Manual install
+
+If you'd rather install once and point Claude at the binary:
 
 ```bash
 python -m venv ~/.local/annomate
 ~/.local/annomate/bin/pip install annomate-mcp
+claude mcp add annomate ~/.local/annomate/bin/annomate
 ```
 
-### Pick the extras you want
+### Available extras
 
-```bash
-# Local AI models (~3 GB on disk, lazy-downloaded on first use)
-pip install 'annomate-mcp[ai]'
-
-# Faster detection (YOLO-World, ~95 MB)
-pip install 'annomate-mcp[ai,yolo]'
-
-# Free-form Q&A via chat VLM (Qwen2.5-VL-3B, ~6 GB)
-pip install 'annomate-mcp[ai,chat]'
-
-# Format conversion (HEIC, PDF) + EXIF metadata
-pip install 'annomate-mcp[io]'
-
-# OCR via Tesseract
-pip install 'annomate-mcp[ocr]'
-
-# Everything
-pip install 'annomate-mcp[ai,yolo,chat,io,ocr]'
-```
+| Extra | What it adds | Approx size |
+|---|---|---|
+| `[ai]` | GroundingDINO, SAM 2, Florence-2, CLIP, OpenCV | ~3 GB (lazy-downloaded) |
+| `[yolo]` | YOLO-World (faster detection, Apache) + YOLOE (AGPL) | ~95 MB |
+| `[chat]` | Qwen2.5-VL-3B free-form Q&A | ~6 GB |
+| `[io]` | HEIC/AVIF/PDF loading, rich EXIF metadata | small |
+| `[ocr]` | Tesseract OCR over image regions | small |
 
 ## System packages
 
@@ -77,27 +83,6 @@ install themselves. Install only what you'll use.
 
 HEIC support (`pillow-heif`) bundles its own `libheif`; no system package is
 required.
-
-## Setup
-
-Add to your Claude Code MCP config (`.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "annomate": {
-      "command": "/path/to/annomate"
-    }
-  }
-}
-```
-
-Find your entry point after install:
-
-```bash
-which annomate                    # global/user install
-~/.local/annomate/bin/annomate    # venv
-```
 
 ## Usage
 
